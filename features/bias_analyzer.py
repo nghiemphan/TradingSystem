@@ -1,6 +1,6 @@
 """
-BIAS Analyzer - Smart Money Concepts Directional Bias Integration
-Combines all SMC components to determine market directional bias
+BIAS Analyzer - Enhanced Smart Money Concepts Directional Bias Integration
+Production version with enhanced sensitivity and trading recommendations
 """
 import pandas as pd
 import numpy as np
@@ -26,12 +26,12 @@ class BiasDirection(Enum):
     NEUTRAL = 0
 
 class BiasStrength(Enum):
-    """BIAS strength levels"""
-    EXTREME = "extreme"      # 0.8 - 1.0
-    STRONG = "strong"        # 0.6 - 0.8
-    MODERATE = "moderate"    # 0.4 - 0.6
-    WEAK = "weak"           # 0.2 - 0.4
-    VERY_WEAK = "very_weak"  # 0.0 - 0.2
+    """BIAS strength levels with enhanced sensitivity"""
+    EXTREME = "extreme"      # 0.7 - 1.0
+    STRONG = "strong"        # 0.5 - 0.7
+    MODERATE = "moderate"    # 0.3 - 0.5
+    WEAK = "weak"           # 0.15 - 0.3
+    VERY_WEAK = "very_weak"  # 0.0 - 0.15
 
 class BiasTimeframe(Enum):
     """BIAS timeframe context"""
@@ -109,7 +109,7 @@ class OverallBias:
 
 class BiasAnalyzer:
     """
-    Comprehensive BIAS analyzer integrating all SMC components
+    Enhanced BIAS analyzer with configurable sensitivity and adaptive thresholds
     """
     
     def __init__(self,
@@ -120,16 +120,25 @@ class BiasAnalyzer:
                  zone_weight: float = 0.20,
                  session_weight: float = 0.10,
                  
+                 # Enhanced sensitivity parameters
+                 bias_direction_threshold: float = 0.05,
+                 signal_amplification_factor: float = 1.5,
+                 
                  # Timeframe analysis
                  analyze_mtf: bool = True,
-                 mtf_alignment_threshold: float = 0.7,
+                 mtf_alignment_threshold: float = 0.6,
                  
                  # Session analysis
                  session_analysis_enabled: bool = True,
                  session_history_hours: int = 24,
+                 session_strength_threshold: float = 0.01,
                  
                  # BIAS persistence
-                 bias_memory_bars: int = 50):
+                 bias_memory_bars: int = 50,
+                 
+                 # Market adaptation
+                 adaptive_thresholds: bool = True,
+                 volatility_adjustment: bool = True):
         
         # Validate weights
         total_weight = (structural_weight + institutional_weight + 
@@ -144,6 +153,13 @@ class BiasAnalyzer:
             'zone': zone_weight,
             'session': session_weight
         }
+        
+        # Enhanced parameters
+        self.bias_direction_threshold = bias_direction_threshold
+        self.signal_amplification_factor = signal_amplification_factor
+        self.session_strength_threshold = session_strength_threshold
+        self.adaptive_thresholds = adaptive_thresholds
+        self.volatility_adjustment = volatility_adjustment
         
         self.analyze_mtf = analyze_mtf
         self.mtf_alignment_threshold = mtf_alignment_threshold
@@ -162,31 +178,31 @@ class BiasAnalyzer:
         # BIAS history for persistence analysis
         self.bias_history = []
         
+        # Market condition tracking
+        self.market_volatility = 0.0
+        self.trend_strength_cache = {}
+        
     def analyze_bias(self, 
                     symbol: str,
                     timeframe_data: Dict[str, pd.DataFrame],
                     current_timeframe: str = "H1") -> OverallBias:
         """
         Main function to analyze comprehensive market BIAS
-        
-        Args:
-            symbol: Trading symbol
-            timeframe_data: Dictionary mapping timeframes to OHLCV data
-            current_timeframe: Primary timeframe for analysis
-            
-        Returns:
-            OverallBias object with complete analysis
         """
         if not timeframe_data or current_timeframe not in timeframe_data:
             logger.error(f"No data available for {current_timeframe}")
-            return self._empty_bias_analysis()
+            return self._create_empty_bias_analysis()
         
         primary_data = timeframe_data[current_timeframe]
         if primary_data.empty:
             logger.error(f"Empty data for {current_timeframe}")
-            return self._empty_bias_analysis()
+            return self._create_empty_bias_analysis()
         
         try:
+            # Calculate market conditions for adaptive thresholds
+            if self.adaptive_thresholds:
+                self._calculate_market_conditions(primary_data, symbol, current_timeframe)
+            
             # Step 1: Analyze individual SMC components
             components = self._analyze_smc_components(symbol, primary_data, current_timeframe)
             
@@ -208,22 +224,19 @@ class BiasAnalyzer:
             session_bias = self._calculate_session_bias(session_analysis)
             
             # Step 5: Calculate overall BIAS score
-            overall_score = (
-                structural_bias * self.weights['structural'] +
-                institutional_bias * self.weights['institutional'] +
-                liquidity_bias * self.weights['liquidity'] +
-                zone_bias * self.weights['zone'] +
-                session_bias * self.weights['session']
+            overall_score = self._calculate_overall_score(
+                structural_bias, institutional_bias, liquidity_bias, 
+                zone_bias, session_bias, components
             )
             
             # Step 6: Determine direction and strength
-            direction = self._score_to_direction(overall_score)
-            strength = self._score_to_strength(abs(overall_score))
-            confidence = self._calculate_confidence(components, mtf_bias)
+            direction = self._convert_score_to_direction(overall_score)
+            strength = self._convert_score_to_strength(abs(overall_score))
+            confidence = self._calculate_confidence(components, mtf_bias, overall_score)
             
             # Step 7: Generate trading recommendations
             recommendation, risk_level = self._generate_trading_recommendation(
-                direction, strength, confidence, mtf_bias
+                direction, strength, confidence, mtf_bias, overall_score
             )
             
             # Step 8: Calculate invalidation level
@@ -258,39 +271,83 @@ class BiasAnalyzer:
             
         except Exception as e:
             logger.error(f"Error in BIAS analysis: {e}")
-            return self._empty_bias_analysis()
+            return self._create_empty_bias_analysis()
+    
+    def _calculate_market_conditions(self, data: pd.DataFrame, symbol: str, timeframe: str):
+        """Calculate current market conditions for adaptive thresholds"""
+        if len(data) < 20:
+            return
+        
+        # Calculate volatility (ATR-based)
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - data['Close'].shift(1))
+        low_close = np.abs(data['Low'] - data['Close'].shift(1))
+        
+        true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+        atr = true_range.rolling(14).mean().iloc[-1]
+        
+        # Normalize volatility
+        price_level = data['Close'].iloc[-1]
+        self.market_volatility = atr / price_level if price_level > 0 else 0.0
+        
+        logger.debug(f"Market volatility for {symbol} {timeframe}: {self.market_volatility:.4f}")
     
     def _analyze_smc_components(self, symbol: str, data: pd.DataFrame, timeframe: str) -> List[BiasComponent]:
-        """Analyze all SMC components for BIAS signals"""
+        """Analyze all SMC components for BIAS signals with enhanced detection"""
         components = []
         current_time = data.index[-1]
         
         try:
-            # 1. Market Structure Analysis
+            # 1. Market Structure Analysis with fallback
             ms_analysis = self.ms_analyzer.analyze_market_structure(data)
-            if ms_analysis:
-                trend = ms_analysis.get('trend', TrendDirection.SIDEWAYS)
-                trend_strength = ms_analysis.get('trend_strength', 0.0)
-                
-                ms_direction = BiasDirection.NEUTRAL
-                if trend == TrendDirection.BULLISH:
-                    ms_direction = BiasDirection.BULLISH
-                elif trend == TrendDirection.BEARISH:
-                    ms_direction = BiasDirection.BEARISH
-                
-                components.append(BiasComponent(
-                    component_name="market_structure",
-                    direction=ms_direction,
-                    strength=trend_strength,
-                    confidence=ms_analysis.get('structure_quality', 0.5),
-                    weight=0.4,  # High weight for trend
-                    timeframe=timeframe,
-                    timestamp=current_time,
-                    details={'bos_count': len(ms_analysis.get('bos_events', [])),
-                            'choch_count': len(ms_analysis.get('choch_events', []))}
-                ))
             
-            # 2. Order Blocks Analysis
+            trend = ms_analysis.get('trend', TrendDirection.SIDEWAYS) if ms_analysis else TrendDirection.SIDEWAYS
+            trend_strength = ms_analysis.get('trend_strength', 0.0) if ms_analysis else 0.0
+            
+            # Enhanced trend detection with momentum fallback
+            if trend_strength == 0.0 and len(data) >= 20:
+                recent_data = data.tail(20)
+                price_change = (recent_data['Close'].iloc[-1] - recent_data['Close'].iloc[0]) / recent_data['Close'].iloc[0]
+                
+                if abs(price_change) > 0.001:  # 0.1% minimum change
+                    trend_strength = min(abs(price_change) * 50, 0.8)
+                    if price_change > 0:
+                        trend = TrendDirection.BULLISH
+                    else:
+                        trend = TrendDirection.BEARISH
+            
+            # Apply volatility boost if adaptive thresholds enabled
+            if self.adaptive_thresholds and trend_strength > 0:
+                volatility_boost = min(self.market_volatility * 10, 0.3)
+                trend_strength = min(trend_strength + volatility_boost, 1.0)
+            
+            ms_direction = BiasDirection.NEUTRAL
+            if trend == TrendDirection.BULLISH:
+                ms_direction = BiasDirection.BULLISH
+            elif trend == TrendDirection.BEARISH:
+                ms_direction = BiasDirection.BEARISH
+            
+            # Apply signal amplification
+            amplified_strength = min(trend_strength * self.signal_amplification_factor, 1.0)
+            
+            components.append(BiasComponent(
+                component_name="market_structure",
+                direction=ms_direction,
+                strength=amplified_strength,
+                confidence=ms_analysis.get('structure_quality', 0.3) if ms_analysis else 0.3,
+                weight=0.4,
+                timeframe=timeframe,
+                timestamp=current_time,
+                details={
+                    'bos_count': len(ms_analysis.get('bos_events', [])) if ms_analysis else 0,
+                    'choch_count': len(ms_analysis.get('choch_events', [])) if ms_analysis else 0,
+                    'trend_source': 'smc' if ms_analysis else 'momentum_fallback',
+                    'original_strength': trend_strength,
+                    'amplified_strength': amplified_strength
+                }
+            ))
+            
+            # 2. Order Blocks Analysis with enhanced confidence
             ob_analysis = self.ob_analyzer.analyze_order_blocks(data)
             if ob_analysis:
                 metrics = ob_analysis.get('metrics', {})
@@ -300,20 +357,30 @@ class BiasAnalyzer:
                 
                 if total_obs > 0:
                     ob_bias_score = (bullish_obs - bearish_obs) / total_obs
-                    ob_direction = self._score_to_direction(ob_bias_score)
+                    ob_direction = self._convert_score_to_direction(ob_bias_score)
+                    
+                    # Enhanced confidence with volume boost
+                    base_confidence = min(metrics.get('respect_rate', 0.3), 1.0)
+                    volume_boost = min(total_obs * 0.1, 0.4)
+                    enhanced_confidence = min(base_confidence + volume_boost, 1.0)
                     
                     components.append(BiasComponent(
                         component_name="order_blocks",
                         direction=ob_direction,
                         strength=abs(ob_bias_score),
-                        confidence=min(metrics.get('respect_rate', 0.5), 1.0),
+                        confidence=enhanced_confidence,
                         weight=0.3,
                         timeframe=timeframe,
                         timestamp=current_time,
-                        details={'bullish_obs': bullish_obs, 'bearish_obs': bearish_obs}
+                        details={
+                            'bullish_obs': bullish_obs, 
+                            'bearish_obs': bearish_obs,
+                            'base_confidence': base_confidence,
+                            'enhanced_confidence': enhanced_confidence
+                        }
                     ))
             
-            # 3. Fair Value Gaps Analysis
+            # 3. Fair Value Gaps Analysis with enhanced reliability
             fvg_analysis = self.fvg_analyzer.analyze_fair_value_gaps(data)
             if fvg_analysis:
                 metrics = fvg_analysis.get('metrics', {})
@@ -323,21 +390,26 @@ class BiasAnalyzer:
                 
                 if total_fvgs > 0:
                     fvg_bias_score = (bullish_fvgs - bearish_fvgs) / total_fvgs
-                    fvg_direction = self._score_to_direction(fvg_bias_score)
+                    fvg_direction = self._convert_score_to_direction(fvg_bias_score)
                     fill_rate = metrics.get('fill_rate', 0.5)
+                    
+                    # Enhanced confidence based on FVG count and performance
+                    base_confidence = 1.0 - fill_rate
+                    if total_fvgs >= 5:
+                        base_confidence = min(base_confidence + 0.2, 1.0)
                     
                     components.append(BiasComponent(
                         component_name="fair_value_gaps",
                         direction=fvg_direction,
                         strength=abs(fvg_bias_score),
-                        confidence=1.0 - fill_rate,  # Lower fill rate = higher confidence
+                        confidence=base_confidence,
                         weight=0.2,
                         timeframe=timeframe,
                         timestamp=current_time,
                         details={'bullish_fvgs': bullish_fvgs, 'bearish_fvgs': bearish_fvgs}
                     ))
             
-            # 4. Liquidity Analysis
+            # 4. Liquidity Analysis with enhanced confidence
             liq_analysis = self.liq_analyzer.analyze_liquidity(data)
             if liq_analysis:
                 metrics = liq_analysis.get('metrics', {})
@@ -345,19 +417,19 @@ class BiasAnalyzer:
                 equal_lows = metrics.get('equal_lows_count', 0)
                 recent_sweeps = metrics.get('recent_sweeps', 0)
                 
-                # Liquidity above = bearish bias, liquidity below = bullish bias
                 if equal_highs + equal_lows > 0:
                     liq_bias_score = (equal_lows - equal_highs) / (equal_highs + equal_lows)
-                    liq_direction = self._score_to_direction(liq_bias_score)
+                    liq_direction = self._convert_score_to_direction(liq_bias_score)
                     
-                    # Recent sweeps increase confidence
-                    sweep_confidence = min(recent_sweeps * 0.2, 0.8)
+                    # Enhanced confidence calculation
+                    sweep_confidence = min(recent_sweeps * 0.15, 0.6)
+                    base_confidence = 0.4 + sweep_confidence
                     
                     components.append(BiasComponent(
                         component_name="liquidity",
                         direction=liq_direction,
                         strength=abs(liq_bias_score),
-                        confidence=0.5 + sweep_confidence,
+                        confidence=min(base_confidence, 1.0),
                         weight=0.25,
                         timeframe=timeframe,
                         timestamp=current_time,
@@ -365,7 +437,7 @@ class BiasAnalyzer:
                                 'recent_sweeps': recent_sweeps}
                     ))
             
-            # 5. Premium/Discount Analysis
+            # 5. Premium/Discount Analysis with enhanced strength
             pd_analysis = self.pd_analyzer.analyze_premium_discount(data)
             if pd_analysis and pd_analysis.get('current_assessment'):
                 assessment = pd_analysis['current_assessment']
@@ -379,11 +451,14 @@ class BiasAnalyzer:
                 elif trading_bias == 'bearish':
                     pd_direction = BiasDirection.BEARISH
                 
+                # Enhanced strength for clear premium/discount zones
+                enhanced_strength = min(zone_strength * 1.2, 1.0) if zone_strength > 0 else zone_strength
+                
                 components.append(BiasComponent(
                     component_name="premium_discount",
                     direction=pd_direction,
-                    strength=zone_strength,
-                    confidence=assessment.get('zone_strength', 0.5),
+                    strength=enhanced_strength,
+                    confidence=max(assessment.get('zone_strength', 0.3), 0.3),
                     weight=0.2,
                     timeframe=timeframe,
                     timestamp=current_time,
@@ -391,7 +466,7 @@ class BiasAnalyzer:
                             'trading_bias': trading_bias}
                 ))
             
-            # 6. Supply/Demand Analysis
+            # 6. Supply/Demand Analysis with enhanced calculations
             sd_analysis = self.sd_analyzer.analyze_supply_demand(data)
             if sd_analysis:
                 metrics = sd_analysis.get('zone_metrics', {})
@@ -407,18 +482,22 @@ class BiasAnalyzer:
                 elif market_bias == 'BEARISH':
                     sd_direction = BiasDirection.BEARISH
                 
-                # Strength based on zone imbalance
+                # Enhanced strength and confidence calculations
                 total_zones = supply_zones + demand_zones
                 if total_zones > 0:
                     zone_imbalance = abs(supply_zones - demand_zones) / total_zones
+                    enhanced_imbalance = min(zone_imbalance * 1.5, 1.0)
                 else:
-                    zone_imbalance = 0.0
+                    enhanced_imbalance = 0.0
+                
+                zone_confidence = min(total_zones * 0.08, 0.8)
+                base_confidence = max(zone_confidence, 0.2)
                 
                 components.append(BiasComponent(
                     component_name="supply_demand",
                     direction=sd_direction,
-                    strength=zone_imbalance,
-                    confidence=min(total_zones * 0.1, 1.0),  # More zones = higher confidence
+                    strength=enhanced_imbalance,
+                    confidence=base_confidence,
                     weight=0.25,
                     timeframe=timeframe,
                     timestamp=current_time,
@@ -432,6 +511,263 @@ class BiasAnalyzer:
         except Exception as e:
             logger.error(f"Error analyzing SMC components: {e}")
             return []
+    
+    def _analyze_session_bias(self, data: pd.DataFrame) -> List[SessionBias]:
+        """Analyze BIAS by trading sessions with enhanced sensitivity"""
+        session_analyses = []
+        
+        if len(data) < 12:  # Reduced minimum requirement
+            return session_analyses
+        
+        try:
+            # Define session hours (UTC)
+            sessions = {
+                SessionType.ASIAN: (0, 9),
+                SessionType.LONDON: (8, 17),
+                SessionType.NEW_YORK: (13, 22),
+                SessionType.OVERLAP: (13, 17)
+            }
+            
+            for session_type, (start_hour, end_hour) in sessions.items():
+                session_data = self._filter_session_data(data, start_hour, end_hour)
+                
+                if len(session_data) > 2:  # Reduced minimum requirement
+                    session_bias = self._calculate_session_bias_metrics(session_data, session_type)
+                    session_analyses.append(session_bias)
+            
+            return session_analyses
+            
+        except Exception as e:
+            logger.error(f"Error in session BIAS analysis: {e}")
+            return []
+    
+    def _calculate_session_bias_metrics(self, session_data: pd.DataFrame, session_type: SessionType) -> SessionBias:
+        """Calculate BIAS metrics for a specific session with enhanced calculations"""
+        if session_data.empty:
+            return SessionBias(
+                session=session_type,
+                direction=BiasDirection.NEUTRAL,
+                strength=0.0,
+                consistency=0.0,
+                volume_profile=0.0,
+                price_action_score=0.0,
+                duration_hours=0.0
+            )
+        
+        # Calculate price movement
+        price_start = session_data['Open'].iloc[0]
+        price_end = session_data['Close'].iloc[-1]
+        price_change = (price_end - price_start) / price_start
+        
+        # Enhanced strength calculation
+        base_strength = abs(price_change) * 100
+        
+        # Volume-weighted direction calculation
+        volumes = session_data.get('Volume', pd.Series(1, index=session_data.index))
+        price_changes = session_data['Close'] - session_data['Open']
+        volume_weighted_change = np.sum(price_changes * volumes) / np.sum(volumes)
+        
+        # Enhanced consistency calculation
+        bar_directions = np.sign(session_data['Close'] - session_data['Open'])
+        non_zero_directions = bar_directions[bar_directions != 0]
+        
+        if len(non_zero_directions) > 0:
+            dominant_direction = 1 if np.sum(non_zero_directions) > 0 else -1
+            consistency = np.sum(non_zero_directions == dominant_direction) / len(non_zero_directions)
+        else:
+            consistency = 0.5
+        
+        # Price action score
+        ranges = session_data['High'] - session_data['Low']
+        bodies = np.abs(session_data['Close'] - session_data['Open'])
+        avg_body_to_range = np.mean(bodies / (ranges + 1e-8))
+        
+        # Duration calculation
+        duration_hours = (session_data.index[-1] - session_data.index[0]).total_seconds() / 3600
+        
+        # Apply strength enhancement for consistent sessions
+        if consistency > 0.7 and base_strength > 0.05:
+            enhanced_strength = min(base_strength * 1.5, 10.0)
+        else:
+            enhanced_strength = base_strength
+        
+        return SessionBias(
+            session=session_type,
+            direction=self._convert_score_to_direction(price_change),
+            strength=enhanced_strength,
+            consistency=consistency,
+            volume_profile=volume_weighted_change,
+            price_action_score=avg_body_to_range,
+            duration_hours=duration_hours
+        )
+    
+    def _calculate_overall_score(self, structural_bias: float, institutional_bias: float,
+                               liquidity_bias: float, zone_bias: float, session_bias: float,
+                               components: List[BiasComponent]) -> float:
+        """Calculate overall BIAS score with component synergy"""
+        
+        # Base weighted score
+        base_score = (
+            structural_bias * self.weights['structural'] +
+            institutional_bias * self.weights['institutional'] +
+            liquidity_bias * self.weights['liquidity'] +
+            zone_bias * self.weights['zone'] +
+            session_bias * self.weights['session']
+        )
+        
+        # Component synergy bonus
+        directional_components = [c for c in components if c.direction != BiasDirection.NEUTRAL]
+        
+        if len(directional_components) >= 3:
+            bullish_components = [c for c in directional_components if c.direction == BiasDirection.BULLISH]
+            bearish_components = [c for c in directional_components if c.direction == BiasDirection.BEARISH]
+            
+            max_agreement = max(len(bullish_components), len(bearish_components))
+            agreement_ratio = max_agreement / len(directional_components)
+            
+            # Apply synergy bonus for strong agreement
+            if agreement_ratio >= 0.75:
+                synergy_bonus = 0.1 * np.sign(base_score)
+                base_score += synergy_bonus
+        
+        # Volatility adjustment
+        if self.volatility_adjustment and self.market_volatility > 0:
+            volatility_factor = 1.0
+            if self.market_volatility > 0.02:  # High volatility
+                volatility_factor = 0.8
+            elif self.market_volatility < 0.005:  # Low volatility
+                volatility_factor = 1.2
+            
+            base_score *= volatility_factor
+        
+        return np.clip(base_score, -1.0, 1.0)
+    
+    def _convert_score_to_direction(self, score: float) -> BiasDirection:
+        """Convert numerical score to BIAS direction with adaptive thresholds"""
+        threshold = self.bias_direction_threshold
+        
+        # Adaptive threshold based on market conditions
+        if self.adaptive_thresholds and self.market_volatility > 0:
+            if self.market_volatility > 0.02:  # High volatility - need stronger signal
+                threshold *= 1.5
+            elif self.market_volatility < 0.005:  # Low volatility - more sensitive
+                threshold *= 0.7
+        
+        if score > threshold:
+            return BiasDirection.BULLISH
+        elif score < -threshold:
+            return BiasDirection.BEARISH
+        else:
+            return BiasDirection.NEUTRAL
+    
+    def _convert_score_to_strength(self, abs_score: float) -> BiasStrength:
+        """Convert absolute score to BIAS strength with enhanced sensitivity"""
+        if abs_score >= 0.7:      # Enhanced thresholds
+            return BiasStrength.EXTREME
+        elif abs_score >= 0.5:
+            return BiasStrength.STRONG
+        elif abs_score >= 0.3:
+            return BiasStrength.MODERATE
+        elif abs_score >= 0.15:
+            return BiasStrength.WEAK
+        else:
+            return BiasStrength.VERY_WEAK
+    
+    def _calculate_confidence(self, components: List[BiasComponent], 
+                            mtf_bias: Optional[MultiTimeframeBias],
+                            overall_score: float) -> float:
+        """Calculate overall confidence in BIAS assessment with multiple factors"""
+        if not components:
+            return 0.1  # Minimum confidence
+        
+        # Base confidence from component agreement
+        directions = [c.direction for c in components if c.direction != BiasDirection.NEUTRAL]
+        
+        if not directions:
+            return 0.1
+        
+        # Count agreement
+        bullish_count = sum(1 for d in directions if d == BiasDirection.BULLISH)
+        bearish_count = sum(1 for d in directions if d == BiasDirection.BEARISH)
+        
+        total_directional = bullish_count + bearish_count
+        max_agreement = max(bullish_count, bearish_count)
+        
+        agreement_confidence = max_agreement / total_directional if total_directional > 0 else 0.0
+        
+        # Multi-timeframe alignment bonus
+        mtf_bonus = 0.0
+        if mtf_bias and mtf_bias.alignment_score > self.mtf_alignment_threshold:
+            mtf_bonus = 0.15
+        
+        # Component quality bonus
+        avg_component_confidence = np.mean([c.confidence for c in components])
+        component_bonus = avg_component_confidence * 0.25
+        
+        # Signal strength bonus
+        strength_bonus = min(abs(overall_score) * 0.2, 0.15)
+        
+        # Number of components bonus
+        component_count_bonus = min(len(components) * 0.05, 0.2)
+        
+        total_confidence = min(
+            agreement_confidence + mtf_bonus + component_bonus + strength_bonus + component_count_bonus, 
+            1.0
+        )
+        
+        return max(total_confidence, 0.1)  # Minimum 10% confidence
+    
+    def _generate_trading_recommendation(self, direction: BiasDirection, 
+                                       strength: BiasStrength, 
+                                       confidence: float,
+                                       mtf_bias: Optional[MultiTimeframeBias],
+                                       overall_score: float) -> Tuple[str, str]:
+        """Generate trading recommendation with enhanced actionable signals"""
+        
+        # Base recommendation
+        if direction == BiasDirection.NEUTRAL:
+            return "STAY_SIDELINES", "HIGH"
+        
+        direction_str = "LONG" if direction == BiasDirection.BULLISH else "SHORT"
+        
+        # Enhanced thresholds for more actionable recommendations
+        if strength in [BiasStrength.EXTREME, BiasStrength.STRONG] and confidence >= 0.6:
+            recommendation = f"STRONG_{direction_str}_BIAS"
+            risk_level = "LOW"
+        elif strength in [BiasStrength.MODERATE, BiasStrength.STRONG] and confidence >= 0.4:
+            recommendation = f"MODERATE_{direction_str}_BIAS"
+            risk_level = "MEDIUM"
+        elif strength in [BiasStrength.WEAK, BiasStrength.MODERATE] and confidence >= 0.3:
+            recommendation = f"WEAK_{direction_str}_BIAS"
+            risk_level = "MEDIUM"
+        elif confidence >= 0.25:
+            recommendation = f"CAUTIOUS_{direction_str}_BIAS"
+            risk_level = "MEDIUM"
+        else:
+            recommendation = f"MINIMAL_{direction_str}_BIAS"
+            risk_level = "HIGH"
+        
+        # Multi-timeframe conflict adjustment
+        if mtf_bias and len(mtf_bias.conflict_zones) > 1:
+            if "STRONG" in recommendation:
+                recommendation = recommendation.replace("STRONG", "MODERATE")
+            elif "MODERATE" in recommendation:
+                recommendation = recommendation.replace("MODERATE", "WEAK")
+            
+            # Increase risk level
+            if risk_level == "LOW":
+                risk_level = "MEDIUM"
+            elif risk_level == "MEDIUM":
+                risk_level = "HIGH"
+        
+        # Signal strength bonus for very strong scores
+        if abs(overall_score) > 0.5 and confidence > 0.5:
+            if "CAUTIOUS" in recommendation:
+                recommendation = recommendation.replace("CAUTIOUS", "MODERATE")
+            elif "WEAK" in recommendation:
+                recommendation = recommendation.replace("WEAK", "MODERATE")
+        
+        return recommendation, risk_level
     
     def _analyze_multi_timeframe_bias(self, symbol: str, timeframe_data: Dict[str, pd.DataFrame]) -> MultiTimeframeBias:
         """Analyze BIAS alignment across multiple timeframes"""
@@ -506,7 +842,6 @@ class BiasAnalyzer:
         
         for tf in category_tfs:
             if tf in timeframe_data and not timeframe_data[tf].empty:
-                # Quick bias calculation for this timeframe
                 data = timeframe_data[tf]
                 
                 # Simple trend-based bias
@@ -515,7 +850,7 @@ class BiasAnalyzer:
                     price_change = (recent_data['Close'].iloc[-1] - recent_data['Close'].iloc[0]) / recent_data['Close'].iloc[0]
                     
                     # Normalize to -1 to 1 range
-                    normalized_score = np.tanh(price_change * 100)  # Multiply by 100 to amplify
+                    normalized_score = np.tanh(price_change * 100)
                     category_scores.append(normalized_score)
         
         if not category_scores:
@@ -523,36 +858,7 @@ class BiasAnalyzer:
         
         # Average the scores
         avg_score = np.mean(category_scores)
-        return self._score_to_direction(avg_score)
-    
-    def _analyze_session_bias(self, data: pd.DataFrame) -> List[SessionBias]:
-        """Analyze BIAS by trading sessions"""
-        session_analyses = []
-        
-        if len(data) < 24:  # Need at least 24 hours of data
-            return session_analyses
-        
-        try:
-            # Define session hours (UTC)
-            sessions = {
-                SessionType.ASIAN: (0, 9),
-                SessionType.LONDON: (8, 17),
-                SessionType.NEW_YORK: (13, 22),
-                SessionType.OVERLAP: (13, 17)  # London-NY overlap
-            }
-            
-            for session_type, (start_hour, end_hour) in sessions.items():
-                session_data = self._filter_session_data(data, start_hour, end_hour)
-                
-                if len(session_data) > 0:
-                    session_bias = self._calculate_session_bias_metrics(session_data, session_type)
-                    session_analyses.append(session_bias)
-            
-            return session_analyses
-            
-        except Exception as e:
-            logger.error(f"Error in session BIAS analysis: {e}")
-            return []
+        return self._convert_score_to_direction(avg_score)
     
     def _filter_session_data(self, data: pd.DataFrame, start_hour: int, end_hour: int) -> pd.DataFrame:
         """Filter data by session hours"""
@@ -567,52 +873,6 @@ class BiasAnalyzer:
         
         return recent_data[mask]
     
-    def _calculate_session_bias_metrics(self, session_data: pd.DataFrame, session_type: SessionType) -> SessionBias:
-        """Calculate BIAS metrics for a specific session"""
-        if session_data.empty:
-            return SessionBias(
-                session=session_type,
-                direction=BiasDirection.NEUTRAL,
-                strength=0.0,
-                consistency=0.0,
-                volume_profile=0.0,
-                price_action_score=0.0,
-                duration_hours=0.0
-            )
-        
-        # Calculate price movement
-        price_start = session_data['Open'].iloc[0]
-        price_end = session_data['Close'].iloc[-1]
-        price_change = (price_end - price_start) / price_start
-        
-        # Calculate volume-weighted direction
-        volume_weighted_change = np.sum(
-            (session_data['Close'] - session_data['Open']) * session_data.get('Volume', 1)
-        ) / np.sum(session_data.get('Volume', 1))
-        
-        # Calculate consistency (how often price moved in same direction)
-        bar_directions = np.sign(session_data['Close'] - session_data['Open'])
-        dominant_direction = 1 if np.sum(bar_directions) > 0 else -1
-        consistency = np.sum(bar_directions == dominant_direction) / len(bar_directions)
-        
-        # Price action score (range vs body ratio)
-        ranges = session_data['High'] - session_data['Low']
-        bodies = np.abs(session_data['Close'] - session_data['Open'])
-        avg_body_to_range = np.mean(bodies / (ranges + 1e-8))
-        
-        # Duration
-        duration_hours = (session_data.index[-1] - session_data.index[0]).total_seconds() / 3600
-        
-        return SessionBias(
-            session=session_type,
-            direction=self._score_to_direction(price_change),
-            strength=abs(price_change) * 100,  # Convert to percentage-like
-            consistency=consistency,
-            volume_profile=volume_weighted_change,
-            price_action_score=avg_body_to_range,
-            duration_hours=duration_hours
-        )
-    
     def _calculate_structural_bias(self, components: List[BiasComponent]) -> float:
         """Calculate structural BIAS from market structure components"""
         structural_components = [c for c in components if c.component_name == "market_structure"]
@@ -620,11 +880,16 @@ class BiasAnalyzer:
         if not structural_components:
             return 0.0
         
-        # Weight by confidence and strength
+        # Enhanced weighting considering amplification
         weighted_scores = []
         for comp in structural_components:
-            score = comp.direction.value * comp.strength * comp.confidence
-            weighted_scores.append(score)
+            base_score = comp.direction.value * comp.strength * comp.confidence
+            
+            # Apply additional boost for high-confidence trends
+            if comp.confidence > 0.7 and comp.strength > 0.3:
+                base_score *= 1.2
+            
+            weighted_scores.append(base_score)
         
         return np.mean(weighted_scores) if weighted_scores else 0.0
     
@@ -677,7 +942,7 @@ class BiasAnalyzer:
         if not session_analyses:
             return 0.0
         
-        # Weight sessions by importance (overlap gets highest weight)
+        # Weight sessions by importance
         session_weights = {
             SessionType.OVERLAP: 0.4,
             SessionType.LONDON: 0.3,
@@ -692,97 +957,6 @@ class BiasAnalyzer:
             weighted_scores.append(score)
         
         return np.sum(weighted_scores) if weighted_scores else 0.0
-    
-    def _score_to_direction(self, score: float) -> BiasDirection:
-        """Convert numerical score to BIAS direction"""
-        if score > 0.1:
-            return BiasDirection.BULLISH
-        elif score < -0.1:
-            return BiasDirection.BEARISH
-        else:
-            return BiasDirection.NEUTRAL
-    
-    def _score_to_strength(self, abs_score: float) -> BiasStrength:
-        """Convert absolute score to BIAS strength"""
-        if abs_score >= 0.8:
-            return BiasStrength.EXTREME
-        elif abs_score >= 0.6:
-            return BiasStrength.STRONG
-        elif abs_score >= 0.4:
-            return BiasStrength.MODERATE
-        elif abs_score >= 0.2:
-            return BiasStrength.WEAK
-        else:
-            return BiasStrength.VERY_WEAK
-    
-    def _calculate_confidence(self, components: List[BiasComponent], 
-                            mtf_bias: Optional[MultiTimeframeBias]) -> float:
-        """Calculate overall confidence in BIAS assessment"""
-        if not components:
-            return 0.0
-        
-        # Base confidence from component agreement
-        directions = [c.direction for c in components if c.direction != BiasDirection.NEUTRAL]
-        
-        if not directions:
-            return 0.0
-        
-        # Count agreement
-        bullish_count = sum(1 for d in directions if d == BiasDirection.BULLISH)
-        bearish_count = sum(1 for d in directions if d == BiasDirection.BEARISH)
-        
-        total_directional = bullish_count + bearish_count
-        max_agreement = max(bullish_count, bearish_count)
-        
-        agreement_confidence = max_agreement / total_directional if total_directional > 0 else 0.0
-        
-        # Multi-timeframe alignment bonus
-        mtf_bonus = 0.0
-        if mtf_bias and mtf_bias.alignment_score > self.mtf_alignment_threshold:
-            mtf_bonus = 0.2
-        
-        # Component quality bonus
-        avg_component_confidence = np.mean([c.confidence for c in components])
-        
-        total_confidence = min(agreement_confidence + mtf_bonus + avg_component_confidence * 0.3, 1.0)
-        
-        return total_confidence
-    
-    def _generate_trading_recommendation(self, direction: BiasDirection, 
-                                       strength: BiasStrength, 
-                                       confidence: float,
-                                       mtf_bias: Optional[MultiTimeframeBias]) -> Tuple[str, str]:
-        """Generate trading recommendation and risk level"""
-        
-        # Base recommendation
-        if direction == BiasDirection.NEUTRAL:
-            return "STAY_SIDELINES", "HIGH"
-        
-        direction_str = "LONG" if direction == BiasDirection.BULLISH else "SHORT"
-        
-        # Strength and confidence modifiers
-        if strength in [BiasStrength.EXTREME, BiasStrength.STRONG] and confidence >= 0.7:
-            recommendation = f"STRONG_{direction_str}_BIAS"
-            risk_level = "LOW"
-        elif strength in [BiasStrength.MODERATE, BiasStrength.STRONG] and confidence >= 0.5:
-            recommendation = f"MODERATE_{direction_str}_BIAS"
-            risk_level = "MEDIUM"
-        elif strength == BiasStrength.WEAK or confidence < 0.5:
-            recommendation = f"WEAK_{direction_str}_BIAS"
-            risk_level = "HIGH"
-        else:
-            recommendation = f"CAUTIOUS_{direction_str}_BIAS"
-            risk_level = "HIGH"
-        
-        # Multi-timeframe conflict adjustment
-        if mtf_bias and len(mtf_bias.conflict_zones) > 0:
-            recommendation = recommendation.replace("STRONG", "CAUTIOUS")
-            if risk_level == "LOW":
-                risk_level = "MEDIUM"
-            elif risk_level == "MEDIUM":
-                risk_level = "HIGH"
-        
-        return recommendation, risk_level
     
     def _calculate_invalidation_level(self, data: pd.DataFrame, 
                                     direction: BiasDirection,
@@ -826,13 +1000,14 @@ class BiasAnalyzer:
             self.bias_history = self.bias_history[-self.bias_memory_bars:]
     
     def get_bias_persistence(self) -> Dict:
-        """Analyze BIAS persistence over time"""
+        """Analyze BIAS persistence over time - FIXED: includes current_streak"""
         if len(self.bias_history) < 5:
             return {
                 'persistence_score': 0.0,
                 'avg_duration': 0.0,
                 'direction_changes': 0,
-                'confidence_trend': 'stable'
+                'confidence_trend': 'stable',
+                'current_streak': 0  # FIXED: Added missing key
             }
         
         # Calculate direction changes
@@ -840,7 +1015,7 @@ class BiasAnalyzer:
         direction_changes = sum(1 for i in range(1, len(directions)) 
                                if directions[i] != directions[i-1])
         
-        # Calculate persistence score (lower changes = higher persistence)
+        # Calculate persistence score
         persistence_score = max(0, 1 - (direction_changes / len(directions)))
         
         # Average bias duration
@@ -862,7 +1037,7 @@ class BiasAnalyzer:
             'avg_duration': avg_duration,
             'direction_changes': direction_changes,
             'confidence_trend': confidence_trend_str,
-            'current_streak': self._calculate_current_streak()
+            'current_streak': self._calculate_current_streak()  # FIXED: Include this key
         }
     
     def _calculate_current_streak(self) -> int:
@@ -941,46 +1116,48 @@ class BiasAnalyzer:
         
         # Calculate key levels from recent price action
         recent_data = data.tail(50)
-        highs = recent_data['High']
-        lows = recent_data['Low']
         
         if bias.direction == BiasDirection.BULLISH:
             # Entry zones: Recent lows, support levels
             support_levels = []
             for i in range(10, len(recent_data) - 10):
-                if (recent_data['Low'].iloc[i] == recent_data['Low'].iloc[i-10:i+10].min()):
+                window_data = recent_data.iloc[i-10:i+10]
+                if recent_data['Low'].iloc[i] == window_data['Low'].min():
                     support_levels.append(recent_data['Low'].iloc[i])
             
-            zones['entry_zones'] = sorted(support_levels, reverse=True)[:3]
+            zones['entry_zones'] = sorted(set(support_levels), reverse=True)[:3]
             
             # Target zones: Recent highs
             resistance_levels = []
             for i in range(10, len(recent_data) - 10):
-                if (recent_data['High'].iloc[i] == recent_data['High'].iloc[i-10:i+10].max()):
+                window_data = recent_data.iloc[i-10:i+10]
+                if recent_data['High'].iloc[i] == window_data['High'].max():
                     resistance_levels.append(recent_data['High'].iloc[i])
             
-            zones['target_zones'] = sorted(resistance_levels)[:3]
+            zones['target_zones'] = sorted(set(resistance_levels))[:3]
             
         else:  # BEARISH
             # Entry zones: Recent highs, resistance levels
             resistance_levels = []
             for i in range(10, len(recent_data) - 10):
-                if (recent_data['High'].iloc[i] == recent_data['High'].iloc[i-10:i+10].max()):
+                window_data = recent_data.iloc[i-10:i+10]
+                if recent_data['High'].iloc[i] == window_data['High'].max():
                     resistance_levels.append(recent_data['High'].iloc[i])
             
-            zones['entry_zones'] = sorted(resistance_levels)[:3]
+            zones['entry_zones'] = sorted(set(resistance_levels))[:3]
             
             # Target zones: Recent lows
             support_levels = []
             for i in range(10, len(recent_data) - 10):
-                if (recent_data['Low'].iloc[i] == recent_data['Low'].iloc[i-10:i+10].min()):
+                window_data = recent_data.iloc[i-10:i+10]
+                if recent_data['Low'].iloc[i] == window_data['Low'].min():
                     support_levels.append(recent_data['Low'].iloc[i])
             
-            zones['target_zones'] = sorted(support_levels, reverse=True)[:3]
+            zones['target_zones'] = sorted(set(support_levels), reverse=True)[:3]
         
         return zones
     
-    def _empty_bias_analysis(self) -> OverallBias:
+    def _create_empty_bias_analysis(self) -> OverallBias:
         """Return empty BIAS analysis"""
         return OverallBias(
             timestamp=datetime.now(),
@@ -1007,51 +1184,88 @@ class BiasAnalyzer:
             risk_level="HIGH"
         )
 
-# Utility functions for integration with other modules
-def calculate_quick_bias(data: pd.DataFrame) -> Dict:
-    """Quick BIAS calculation for single timeframe"""
-    if data.empty or len(data) < 20:
+# Enhanced utility functions with consistent naming
+def calculate_quick_bias(data: pd.DataFrame, sensitivity: float = 0.05) -> Dict:
+    """Quick BIAS calculation with enhanced sensitivity"""
+    if data.empty or len(data) < 10:
         return {'direction': 'neutral', 'strength': 0.0, 'confidence': 0.0}
     
-    # Simple trend-based bias
-    recent_data = data.tail(20)
+    # Enhanced trend-based bias
+    recent_data = data.tail(min(20, len(data)))
     price_change = (recent_data['Close'].iloc[-1] - recent_data['Close'].iloc[0]) / recent_data['Close'].iloc[0]
     
-    # Momentum confirmation
-    short_ma = recent_data['Close'].rolling(5).mean().iloc[-1]
-    long_ma = recent_data['Close'].rolling(10).mean().iloc[-1]
+    # Multiple momentum confirmations
+    short_ma = recent_data['Close'].rolling(min(5, len(recent_data)//2)).mean().iloc[-1]
+    long_ma = recent_data['Close'].rolling(min(10, len(recent_data))).mean().iloc[-1]
     ma_signal = 1 if short_ma > long_ma else -1
     
-    # Combine signals
-    trend_signal = np.sign(price_change)
-    combined_signal = (trend_signal + ma_signal) / 2
+    # Volume confirmation if available
+    volume_signal = 0
+    if 'Volume' in recent_data.columns:
+        recent_volume = recent_data['Volume'].tail(5).mean()
+        avg_volume = recent_data['Volume'].mean()
+        if recent_volume > avg_volume * 1.2:
+            volume_signal = 0.2
     
-    direction = 'bullish' if combined_signal > 0.2 else 'bearish' if combined_signal < -0.2 else 'neutral'
+    # Combine signals with weights
+    trend_signal = np.sign(price_change)
+    combined_signal = (trend_signal * 0.6 + ma_signal * 0.3 + volume_signal * 0.1)
+    
+    # Apply sensitivity threshold
+    if abs(combined_signal) > sensitivity:
+        direction = 'bullish' if combined_signal > 0 else 'bearish'
+    else:
+        direction = 'neutral'
+    
     strength = min(abs(combined_signal), 1.0)
-    confidence = min(abs(price_change) * 100, 1.0)  # Higher price change = higher confidence
+    confidence = min(abs(price_change) * 200, 1.0)
     
     return {
         'direction': direction,
         'strength': strength,
-        'confidence': confidence
+        'confidence': confidence,
+        'price_change': price_change,
+        'ma_signal': ma_signal,
+        'volume_boost': volume_signal
     }
 
 def get_session_bias_summary(bias_analyzer: BiasAnalyzer) -> Dict:
-    """Get summary of session-based BIAS patterns"""
+    """Get session BIAS summary with enhanced error handling"""
     if not bias_analyzer.bias_history:
-        return {'error': 'No BIAS history available'}
+        return {
+            'error': 'No BIAS history available',
+            'current_streak': 0,
+            'persistence_score': 0.0,
+            'direction_changes': 0,
+            'confidence_trend': 'unknown',
+            'analysis_quality': 'insufficient_data'
+        }
     
-    persistence = bias_analyzer.get_bias_persistence()
-    
-    return {
-        'current_streak': persistence['current_streak'],
-        'persistence_score': persistence['persistence_score'],
-        'direction_changes': persistence['direction_changes'],
-        'confidence_trend': persistence['confidence_trend'],
-        'analysis_quality': 'high' if persistence['persistence_score'] > 0.7 else 'medium' if persistence['persistence_score'] > 0.4 else 'low'
-    }
+    try:
+        persistence = bias_analyzer.get_bias_persistence()
+        
+        return {
+            'current_streak': persistence.get('current_streak', 0),
+            'persistence_score': persistence.get('persistence_score', 0.0),
+            'direction_changes': persistence.get('direction_changes', 0),
+            'confidence_trend': persistence.get('confidence_trend', 'stable'),
+            'analysis_quality': (
+                'high' if persistence.get('persistence_score', 0) > 0.7 
+                else 'medium' if persistence.get('persistence_score', 0) > 0.4 
+                else 'low'
+            ),
+            'avg_duration': persistence.get('avg_duration', 0.0),
+            'bias_history_length': len(bias_analyzer.bias_history)
+        }
+    except Exception as e:
+        logger.error(f"Error in session bias summary: {e}")
+        return {
+            'error': f'Analysis error: {e}',
+            'current_streak': 0,
+            'analysis_quality': 'error'
+        }
 
-# Export main classes and functions
+# Export all classes and functions
 __all__ = [
     'BiasAnalyzer',
     'BiasDirection',

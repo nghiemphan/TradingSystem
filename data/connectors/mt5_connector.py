@@ -213,8 +213,59 @@ class MT5Connector:
             df['time'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('time', inplace=True)
             
-            # Rename columns to standard format
-            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Spread']
+            # Check actual columns in the data
+            original_columns = df.columns.tolist()
+            logger.debug(f"Original columns: {original_columns}")
+            
+            # Standard MT5 columns mapping
+            expected_columns = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+            column_mapping = {}
+            
+            # Map available columns to standard names
+            if 'open' in df.columns:
+                column_mapping['open'] = 'Open'
+            if 'high' in df.columns:
+                column_mapping['high'] = 'High'  
+            if 'low' in df.columns:
+                column_mapping['low'] = 'Low'
+            if 'close' in df.columns:
+                column_mapping['close'] = 'Close'
+            
+            # Handle volume columns (tick_volume is more common)
+            if 'tick_volume' in df.columns:
+                column_mapping['tick_volume'] = 'Volume'
+            elif 'real_volume' in df.columns:
+                column_mapping['real_volume'] = 'Volume'
+            
+            # Handle spread
+            if 'spread' in df.columns:
+                column_mapping['spread'] = 'Spread'
+                
+            # Rename only existing columns
+            df = df.rename(columns=column_mapping)
+            
+            # Ensure we have at least OHLC
+            required_cols = ['Open', 'High', 'Low', 'Close']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                logger.error(f"Available columns: {df.columns.tolist()}")
+                return None
+            
+            # Add default Volume if missing
+            if 'Volume' not in df.columns:
+                df['Volume'] = 0
+                logger.warning("Volume column missing, using default values")
+            
+            # Add default Spread if missing  
+            if 'Spread' not in df.columns:
+                df['Spread'] = 0
+                logger.warning("Spread column missing, using default values")
+            
+            # Ensure correct column order
+            final_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Spread']
+            df = df[final_columns]
             
             logger.info(f"Retrieved {len(df)} bars for {symbol} {timeframe}")
             return df

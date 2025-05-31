@@ -315,20 +315,20 @@ class VWAPCalculator:
         
         # Avoid division by zero
         vwap = cumulative_volume_price / cumulative_volume.replace(0, np.nan)
-        return vwap.fillna(method='ffill')
+        
+        # FIXED: Replace deprecated fillna method
+        return vwap.ffill()  # Changed from fillna(method='ffill')
     
     def _calculate_anchored_vwap(self, data: pd.DataFrame, price_series: pd.Series, 
-                                anchor_point: Optional[datetime] = None) -> pd.Series:
+                        anchor_point: Optional[datetime] = None) -> pd.Series:
         """Calculate anchored VWAP from specific point"""
         if anchor_point is None:
-            # Default to start of data
             anchor_point = data.index[0]
         
         # Find anchor index
         try:
             anchor_idx = data.index.get_loc(anchor_point)
         except KeyError:
-            # If exact timestamp not found, use nearest
             anchor_idx = data.index.get_indexer([anchor_point], method='nearest')[0]
         
         # Calculate VWAP from anchor point
@@ -350,10 +350,11 @@ class VWAPCalculator:
                 else:
                     vwap_series.iloc[i] = subset_price.iloc[-1]
         
-        return vwap_series.fillna(method='ffill')
+        # FIXED: Replace deprecated fillna method
+        return vwap_series.ffill()  # Changed from fillna(method='ffill')
     
     def _calculate_rolling_vwap(self, data: pd.DataFrame, price_series: pd.Series, 
-                               window: int = 20) -> pd.Series:
+                           window: int = 20) -> pd.Series:
         """Calculate rolling VWAP over specified window"""
         volume_price = price_series * data['Volume']
         
@@ -361,12 +362,13 @@ class VWAPCalculator:
         rolling_volume = data['Volume'].rolling(window=window).sum()
         
         vwap = rolling_volume_price / rolling_volume.replace(0, np.nan)
-        return vwap.fillna(method='ffill')
+        
+        # FIXED: Replace deprecated fillna method
+        return vwap.ffill()  # Changed from fillna(method='ffill')
     
     def _calculate_session_vwap(self, data: pd.DataFrame, price_series: pd.Series, 
-                               frequency: str) -> pd.Series:
+                           frequency: str) -> pd.Series:
         """Calculate VWAP reset by session (daily, weekly, monthly)"""
-        # Group by frequency
         groups = data.groupby(pd.Grouper(freq=frequency))
         
         vwap_series = pd.Series(index=data.index, dtype=float)
@@ -384,7 +386,8 @@ class VWAPCalculator:
             group_vwap = cumulative_volume_price / cumulative_volume.replace(0, np.nan)
             vwap_series.loc[group.index] = group_vwap
         
-        return vwap_series.fillna(method='ffill')
+        # FIXED: Replace deprecated fillna method
+        return vwap_series.ffill()  # Changed from fillna(method='ffill')
     
     def _calculate_vwap_bands(self, data: pd.DataFrame, vwap_series: pd.Series, 
                              price_series: pd.Series) -> VWAPBands:

@@ -1,657 +1,929 @@
 """
-Volume Profile Analysis for SMC Trading
-Analyzes volume distribution at different price levels to identify key zones
+Volume Profile Analyzer - Smart Money Concepts Component
+Analyzes volume distribution across price levels to identify key support/resistance zones
 """
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import logging
 from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+class VolumeNodeType(Enum):
+    """Volume node classification"""
+    HIGH_VOLUME_NODE = "high_volume_node"    # Above threshold concentration
+    LOW_VOLUME_NODE = "low_volume_node"      # Below threshold concentration
+    POINT_OF_CONTROL = "point_of_control"    # Highest volume price level
+    VALUE_AREA_HIGH = "value_area_high"      # Upper value area boundary
+    VALUE_AREA_LOW = "value_area_low"        # Lower value area boundary
+
 class VolumeProfileType(Enum):
     """Volume profile analysis types"""
-    SESSION = "session"
-    FIXED_RANGE = "fixed_range"
-    VISIBLE_RANGE = "visible_range"
-    ANCHORED = "anchored"
-
-class POCType(Enum):
-    """Point of Control types"""
-    SINGLE = "single"
-    MULTIPLE = "multiple"
-    DEVELOPING = "developing"
+    SESSION_PROFILE = "session_profile"      # Single session analysis
+    COMPOSITE_PROFILE = "composite_profile"  # Multi-session analysis
+    DEVELOPING_PROFILE = "developing_profile" # Real-time developing profile
 
 @dataclass
 class VolumeNode:
-    """Individual volume node at a price level"""
-    price: float
+    """Individual volume node at specific price level"""
+    price_level: float
     volume: int
     percentage: float  # Percentage of total volume
-    bar_count: int     # Number of bars that touched this price
-    first_time: datetime
-    last_time: datetime
+    node_type: VolumeNodeType
+    bar_count: int  # Number of bars at this price level
+    timestamp_first: datetime
+    timestamp_last: datetime
     
-    @property
-    def volume_per_bar(self) -> float:
-        """Average volume per bar at this price level"""
-        return self.volume / self.bar_count if self.bar_count > 0 else 0
+    # SMC context
+    is_institutional_level: bool = False
+    confluence_score: float = 0.0
+    touched_count: int = 0  # How many times price revisited this level
 
 @dataclass
 class ValueArea:
-    """Value Area analysis (70% of volume)"""
-    value_area_high: float
-    value_area_low: float
-    value_area_volume: int
-    value_area_percentage: float
-    poc_price: float
-    poc_volume: int
+    """Value Area (70% of volume concentration)"""
+    value_area_high: float  # VAH - Upper boundary
+    value_area_low: float   # VAL - Lower boundary
+    value_area_volume: int  # Total volume in value area
+    value_area_percentage: float  # Should be ~70%
     
-    @property
-    def value_area_range(self) -> float:
-        """Range of value area"""
-        return self.value_area_high - self.value_area_low
-    
-    @property
-    def poc_position(self) -> str:
-        """Position of POC within value area"""
-        va_range = self.value_area_range
-        if va_range == 0:
-            return "center"
-        
-        poc_position = (self.poc_price - self.value_area_low) / va_range
-        
-        if poc_position < 0.3:
-            return "lower"
-        elif poc_position > 0.7:
-            return "upper"
-        else:
-            return "center"
+    # Value area characteristics
+    width: float  # VAH - VAL
+    midpoint: float  # (VAH + VAL) / 2
+    skew: float  # Positive = upper heavy, Negative = lower heavy
 
 @dataclass
-class VolumeProfile:
-    """Complete volume profile analysis"""
+class VolumeProfileAnalysis:
+    """Complete volume profile analysis result"""
     timestamp: datetime
+    symbol: str
+    timeframe: str
     profile_type: VolumeProfileType
-    start_time: datetime
-    end_time: datetime
     
-    # Core data
-    volume_nodes: List[VolumeNode]
-    total_volume: int
-    total_bars: int
+    # Core components
+    point_of_control: float  # POC - Highest volume price level
+    poc_volume: int
+    poc_percentage: float
     
-    # Key levels
-    poc: VolumeNode  # Point of Control
+    # Value area analysis
     value_area: ValueArea
     
-    # Price levels
-    high_volume_nodes: List[VolumeNode]  # Top 20% by volume
-    low_volume_nodes: List[VolumeNode]   # Bottom 20% by volume
+    # Volume nodes
+    volume_nodes: List[VolumeNode]
+    high_volume_nodes: List[VolumeNode]
+    low_volume_nodes: List[VolumeNode]
     
-    # Market structure
-    volume_imbalances: List[Dict]  # Areas of low volume
-    acceptance_levels: List[float]  # Levels with sustained volume
-    rejection_levels: List[float]   # Levels with quick rejection
+    # Profile characteristics
+    total_volume: int
+    price_range: Tuple[float, float]  # (lowest, highest)
+    volume_distribution: Dict[str, float]  # Distribution statistics
     
-    @property
-    def price_range(self) -> float:
-        """Total price range of the profile"""
-        if not self.volume_nodes:
-            return 0.0
-        prices = [node.price for node in self.volume_nodes]
-        return max(prices) - min(prices)
+    # SMC integration
+    institutional_levels: List[float]
+    support_levels: List[float]
+    resistance_levels: List[float]
+    volume_imbalances: List[Tuple[float, float]]  # (price_start, price_end)
     
-    @property
-    def volume_distribution_balance(self) -> str:
-        """Balance of volume distribution"""
-        poc_position = self.value_area.poc_position
-        
-        if poc_position == "upper":
-            return "bearish_distribution"  # Volume concentrated at top
-        elif poc_position == "lower":
-            return "bullish_distribution"  # Volume concentrated at bottom
-        else:
-            return "balanced_distribution"
+    # Trading context
+    current_price_context: str  # Above/Below/At POC/Value Area
+    trading_bias: str  # Based on volume profile
+    confidence: float  # Analysis confidence (0.0-1.0)
 
 class VolumeProfileAnalyzer:
     """
-    Analyzes volume profiles for institutional trading insights
+    Volume Profile analyzer for SMC integration
+    Analyzes volume distribution to identify institutional activity zones
     """
     
     def __init__(self,
-                 price_resolution: int = 50,        # Number of price levels
-                 min_volume_threshold: float = 0.01, # Minimum 1% volume for node
-                 value_area_percentage: float = 0.70, # 70% for value area
-                 high_volume_threshold: float = 0.80,  # Top 20% volume nodes
-                 low_volume_threshold: float = 0.20,   # Bottom 20% volume nodes
-                 imbalance_threshold: float = 0.30):   # 30% below average for imbalance
+                 # Volume profile parameters
+                 price_levels: int = 50,  # Number of price levels for analysis
+                 value_area_percentage: float = 0.70,  # 70% value area standard
+                 
+                 # Node classification thresholds
+                 high_volume_threshold: float = 2.0,  # 2x average volume
+                 low_volume_threshold: float = 0.5,   # 0.5x average volume
+                 
+                 # SMC integration parameters
+                 institutional_threshold: float = 3.0,  # 3x average for institutional
+                 confluence_enabled: bool = True,
+                 
+                 # Analysis parameters
+                 min_bars_required: int = 20,
+                 volume_smoothing: bool = True,
+                 normalize_volume: bool = True):
         
-        self.price_resolution = price_resolution
-        self.min_volume_threshold = min_volume_threshold
-        self.value_area_percentage = value_area_percentage
+        self.price_levels = max(price_levels, 10)  # Minimum 10 levels
+        self.value_area_percentage = np.clip(value_area_percentage, 0.5, 0.9)
+        
         self.high_volume_threshold = high_volume_threshold
         self.low_volume_threshold = low_volume_threshold
-        self.imbalance_threshold = imbalance_threshold
+        self.institutional_threshold = institutional_threshold
         
-        # Storage for profiles
-        self.session_profiles = []
-        self.anchored_profiles = []
-    
+        self.confluence_enabled = confluence_enabled
+        self.min_bars_required = min_bars_required
+        self.volume_smoothing = volume_smoothing
+        self.normalize_volume = normalize_volume
+        
+        # Analysis cache
+        self._profile_cache = {}
+        
     def analyze_volume_profile(self, data: pd.DataFrame, 
-                             profile_type: VolumeProfileType = VolumeProfileType.SESSION,
-                             anchor_time: Optional[datetime] = None) -> Optional[VolumeProfile]:
+                             profile_type: VolumeProfileType = VolumeProfileType.SESSION_PROFILE) -> Optional[VolumeProfileAnalysis]:
         """
-        Main function to analyze volume profile
+        Main volume profile analysis function
         
         Args:
-            data: OHLCV DataFrame with datetime index
+            data: OHLCV DataFrame
             profile_type: Type of volume profile analysis
-            anchor_time: Anchor point for anchored profiles
             
         Returns:
-            VolumeProfile analysis or None if failed
+            VolumeProfileAnalysis or None if analysis fails
         """
-        if data.empty or len(data) < 10:
-            logger.warning("Insufficient data for volume profile analysis")
+        if data.empty or len(data) < self.min_bars_required:
+            logger.warning(f"Insufficient data for volume profile: {len(data)} bars")
+            return None
+        
+        # Validate required columns
+        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in data.columns for col in required_columns):
+            logger.error("Missing required OHLCV columns for volume profile")
             return None
         
         try:
-            # Determine analysis period
-            if profile_type == VolumeProfileType.ANCHORED and anchor_time:
-                analysis_data = data[data.index >= anchor_time]
-                start_time = anchor_time
-            else:
-                analysis_data = data
-                start_time = data.index[0]
+            # Step 1: Create price-volume distribution
+            price_volume_dist = self._create_price_volume_distribution(data)
             
-            if analysis_data.empty:
+            if not price_volume_dist:
+                logger.error("Failed to create price-volume distribution")
                 return None
             
-            end_time = analysis_data.index[-1]
+            # Step 2: Identify Point of Control (POC)
+            poc_price, poc_volume = self._find_point_of_control(price_volume_dist)
             
-            # Step 1: Create price bins
-            price_bins = self._create_price_bins(analysis_data)
+            # Step 3: Calculate Value Area
+            value_area = self._calculate_value_area(price_volume_dist, poc_price)
             
-            # Step 2: Distribute volume to price levels
-            volume_nodes = self._calculate_volume_distribution(analysis_data, price_bins)
+            # Step 4: Classify volume nodes
+            volume_nodes = self._classify_volume_nodes(price_volume_dist, data)
             
-            if not volume_nodes:
-                return None
+            # Step 5: SMC integration analysis
+            institutional_levels = self._identify_institutional_levels(volume_nodes)
+            support_resistance = self._identify_support_resistance_levels(volume_nodes, data)
+            volume_imbalances = self._identify_volume_imbalances(price_volume_dist)
             
-            # Step 3: Find Point of Control (POC)
-            poc = max(volume_nodes, key=lambda x: x.volume)
+            # Step 6: Trading context analysis
+            current_price = data['Close'].iloc[-1]
+            price_context = self._analyze_price_context(current_price, poc_price, value_area)
+            trading_bias = self._determine_trading_bias(current_price, value_area, volume_nodes)
+            confidence = self._calculate_analysis_confidence(price_volume_dist, volume_nodes)
             
-            # Step 4: Calculate Value Area
-            value_area = self._calculate_value_area(volume_nodes)
+            # Step 7: Create comprehensive result
+            total_volume = sum(vol for vol in price_volume_dist.values())
+            price_range = (min(price_volume_dist.keys()), max(price_volume_dist.keys()))
             
-            # Step 5: Identify key volume levels
-            high_volume_nodes = self._identify_high_volume_nodes(volume_nodes)
-            low_volume_nodes = self._identify_low_volume_nodes(volume_nodes)
+            # Volume distribution statistics
+            volume_distribution = self._calculate_volume_statistics(price_volume_dist, value_area)
             
-            # Step 6: Find volume imbalances
-            volume_imbalances = self._find_volume_imbalances(volume_nodes)
+            # Filter nodes by type
+            high_volume_nodes = [node for node in volume_nodes if node.node_type == VolumeNodeType.HIGH_VOLUME_NODE]
+            low_volume_nodes = [node for node in volume_nodes if node.node_type == VolumeNodeType.LOW_VOLUME_NODE]
             
-            # Step 7: Identify acceptance/rejection levels
-            acceptance_levels = self._identify_acceptance_levels(volume_nodes, analysis_data)
-            rejection_levels = self._identify_rejection_levels(volume_nodes, analysis_data)
-            
-            # Create volume profile
-            profile = VolumeProfile(
-                timestamp=end_time,
+            analysis = VolumeProfileAnalysis(
+                timestamp=data.index[-1],
+                symbol=getattr(data, 'symbol', 'UNKNOWN'),
+                timeframe=getattr(data, 'timeframe', 'UNKNOWN'),
                 profile_type=profile_type,
-                start_time=start_time,
-                end_time=end_time,
-                volume_nodes=volume_nodes,
-                total_volume=sum(node.volume for node in volume_nodes),
-                total_bars=len(analysis_data),
-                poc=poc,
+                
+                # Core components
+                point_of_control=poc_price,
+                poc_volume=poc_volume,
+                poc_percentage=(poc_volume / total_volume * 100) if total_volume > 0 else 0.0,
+                
+                # Value area
                 value_area=value_area,
+                
+                # Volume nodes
+                volume_nodes=volume_nodes,
                 high_volume_nodes=high_volume_nodes,
                 low_volume_nodes=low_volume_nodes,
+                
+                # Profile characteristics
+                total_volume=total_volume,
+                price_range=price_range,
+                volume_distribution=volume_distribution,
+                
+                # SMC integration
+                institutional_levels=institutional_levels,
+                support_levels=support_resistance['support'],
+                resistance_levels=support_resistance['resistance'],
                 volume_imbalances=volume_imbalances,
-                acceptance_levels=acceptance_levels,
-                rejection_levels=rejection_levels
+                
+                # Trading context
+                current_price_context=price_context,
+                trading_bias=trading_bias,
+                confidence=confidence
             )
             
-            # Store profile based on type
-            if profile_type == VolumeProfileType.SESSION:
-                self.session_profiles.append(profile)
-                self._cleanup_old_profiles()
-            elif profile_type == VolumeProfileType.ANCHORED:
-                self.anchored_profiles.append(profile)
+            logger.debug(f"Volume profile analysis completed - POC: {poc_price:.5f}, VAH: {value_area.value_area_high:.5f}, VAL: {value_area.value_area_low:.5f}")
             
-            logger.info(f"Volume profile analysis completed: {len(volume_nodes)} nodes, POC at {poc.price:.5f}")
-            
-            return profile
+            return analysis
             
         except Exception as e:
-            logger.error(f"Error in volume profile analysis: {e}")
+            logger.error(f"Volume profile analysis failed: {e}")
             return None
     
-    def _create_price_bins(self, data: pd.DataFrame) -> np.ndarray:
-        """Create price bins for volume distribution"""
-        price_low = data['Low'].min()
-        price_high = data['High'].max()
-        
-        # Create evenly spaced price levels
-        price_bins = np.linspace(price_low, price_high, self.price_resolution + 1)
-        
-        return price_bins
-    
-    def _calculate_volume_distribution(self, data: pd.DataFrame, 
-                                     price_bins: np.ndarray) -> List[VolumeNode]:
-        """Calculate volume distribution across price levels"""
-        volume_nodes = []
-        
-        # Initialize volume for each price level
-        for i in range(len(price_bins) - 1):
-            price_level = (price_bins[i] + price_bins[i + 1]) / 2
-            volume_nodes.append({
-                'price': price_level,
-                'volume': 0,
-                'bar_count': 0,
-                'first_time': None,
-                'last_time': None,
-                'price_low': price_bins[i],
-                'price_high': price_bins[i + 1]
-            })
-        
-        # Distribute volume to price levels
-        for timestamp, bar in data.iterrows():
-            bar_volume = bar.get('Volume', 1)  # Default to 1 if no volume
-            if bar_volume <= 0:
-                bar_volume = 1
+    def _create_price_volume_distribution(self, data: pd.DataFrame) -> Dict[float, int]:
+        """Create price-volume distribution across specified price levels"""
+        try:
+            # Get price range
+            high_price = data['High'].max()
+            low_price = data['Low'].min()
+            price_range = high_price - low_price
             
-            # Distribute volume across the bar's price range
-            bar_low = bar['Low']
-            bar_high = bar['High']
-            bar_range = bar_high - bar_low
+            if price_range <= 0:
+                logger.error("Invalid price range for volume profile")
+                return {}
             
-            if bar_range <= 0:
-                # If no range, assign all volume to close price
-                close_price = bar['Close']
-                for node in volume_nodes:
-                    if node['price_low'] <= close_price <= node['price_high']:
-                        node['volume'] += bar_volume
-                        node['bar_count'] += 1
-                        if node['first_time'] is None:
-                            node['first_time'] = timestamp
-                        node['last_time'] = timestamp
-                        break
-            else:
-                # Distribute volume proportionally across overlapping price levels
-                for node in volume_nodes:
-                    # Calculate overlap between bar range and price level
-                    overlap_low = max(bar_low, node['price_low'])
-                    overlap_high = min(bar_high, node['price_high'])
-                    
-                    if overlap_high > overlap_low:  # There is overlap
-                        overlap_range = overlap_high - overlap_low
-                        volume_proportion = overlap_range / bar_range
-                        allocated_volume = int(bar_volume * volume_proportion)
-                        
-                        if allocated_volume > 0:
-                            node['volume'] += allocated_volume
-                            node['bar_count'] += 1
-                            if node['first_time'] is None:
-                                node['first_time'] = timestamp
-                            node['last_time'] = timestamp
-        
-        # Convert to VolumeNode objects and filter by minimum threshold
-        total_volume = sum(node['volume'] for node in volume_nodes)
-        min_volume = total_volume * self.min_volume_threshold
-        
-        filtered_nodes = []
-        for node in volume_nodes:
-            if node['volume'] >= min_volume and node['bar_count'] > 0:
-                percentage = (node['volume'] / total_volume) * 100 if total_volume > 0 else 0
+            # Create price levels
+            price_step = price_range / self.price_levels
+            price_levels = [low_price + i * price_step for i in range(self.price_levels + 1)]
+            
+            # Initialize volume distribution
+            volume_distribution = {level: 0 for level in price_levels}
+            
+            # Distribute volume across price levels
+            for idx, row in data.iterrows():
+                bar_volume = row['Volume']
+                bar_high = row['High']
+                bar_low = row['Low']
                 
-                volume_node = VolumeNode(
-                    price=node['price'],
-                    volume=node['volume'],
+                # For each price level, check if it's within this bar's range
+                for price_level in price_levels:
+                    if bar_low <= price_level <= bar_high:
+                        # Distribute volume proportionally
+                        if bar_high > bar_low:
+                            # Weight volume based on proximity to close price
+                            close_distance = abs(price_level - row['Close'])
+                            range_distance = bar_high - bar_low
+                            weight = max(0.1, 1.0 - (close_distance / range_distance))
+                            volume_distribution[price_level] += int(bar_volume * weight / self.price_levels)
+                        else:
+                            # If high == low, assign all volume to that level
+                            volume_distribution[price_level] += bar_volume
+            
+            # Remove zero volume levels and apply smoothing if enabled
+            volume_distribution = {k: v for k, v in volume_distribution.items() if v > 0}
+            
+            if self.volume_smoothing and len(volume_distribution) > 3:
+                volume_distribution = self._smooth_volume_distribution(volume_distribution)
+            
+            return volume_distribution
+            
+        except Exception as e:
+            logger.error(f"Error creating price-volume distribution: {e}")
+            return {}
+    
+    def _smooth_volume_distribution(self, volume_dist: Dict[float, int]) -> Dict[float, int]:
+        """Apply smoothing to volume distribution to reduce noise"""
+        try:
+            prices = sorted(volume_dist.keys())
+            volumes = [volume_dist[price] for price in prices]
+            
+            # Simple moving average smoothing
+            window = min(3, len(volumes) // 5)  # Adaptive window size
+            
+            if window >= 2:
+                smoothed_volumes = []
+                for i in range(len(volumes)):
+                    start_idx = max(0, i - window // 2)
+                    end_idx = min(len(volumes), i + window // 2 + 1)
+                    avg_volume = int(np.mean(volumes[start_idx:end_idx]))
+                    smoothed_volumes.append(avg_volume)
+                
+                return dict(zip(prices, smoothed_volumes))
+            
+            return volume_dist
+            
+        except Exception as e:
+            logger.error(f"Error smoothing volume distribution: {e}")
+            return volume_dist
+    
+    def _find_point_of_control(self, volume_dist: Dict[float, int]) -> Tuple[float, int]:
+        """Find Point of Control (highest volume price level)"""
+        if not volume_dist:
+            return 0.0, 0
+        
+        poc_price = max(volume_dist.keys(), key=lambda k: volume_dist[k])
+        poc_volume = volume_dist[poc_price]
+        
+        return poc_price, poc_volume
+    
+    def _calculate_value_area(self, volume_dist: Dict[float, int], poc_price: float) -> ValueArea:
+        """Calculate Value Area (70% volume concentration around POC)"""
+        try:
+            total_volume = sum(volume_dist.values())
+            target_volume = total_volume * self.value_area_percentage
+            
+            # Sort prices by volume (descending)
+            sorted_by_volume = sorted(volume_dist.items(), key=lambda x: x[1], reverse=True)
+            
+            # Start with POC and expand to include neighboring high-volume areas
+            value_area_volume = 0
+            included_prices = []
+            
+            for price, volume in sorted_by_volume:
+                value_area_volume += volume
+                included_prices.append(price)
+                
+                if value_area_volume >= target_volume:
+                    break
+            
+            # Determine value area boundaries
+            if included_prices:
+                vah = max(included_prices)  # Value Area High
+                val = min(included_prices)  # Value Area Low
+            else:
+                vah = val = poc_price
+            
+            # Calculate value area statistics
+            width = vah - val
+            midpoint = (vah + val) / 2
+            
+            # Calculate skew (distribution within value area)
+            poc_position = (poc_price - val) / width if width > 0 else 0.5
+            skew = (poc_position - 0.5) * 2  # -1 to 1 scale
+            
+            return ValueArea(
+                value_area_high=vah,
+                value_area_low=val,
+                value_area_volume=value_area_volume,
+                value_area_percentage=(value_area_volume / total_volume * 100) if total_volume > 0 else 0.0,
+                width=width,
+                midpoint=midpoint,
+                skew=skew
+            )
+            
+        except Exception as e:
+            logger.error(f"Error calculating value area: {e}")
+            return ValueArea(
+                value_area_high=poc_price,
+                value_area_low=poc_price,
+                value_area_volume=0,
+                value_area_percentage=0.0,
+                width=0.0,
+                midpoint=poc_price,
+                skew=0.0
+            )
+    
+    def _classify_volume_nodes(self, volume_dist: Dict[float, int], data: pd.DataFrame) -> List[VolumeNode]:
+        """Classify volume nodes based on volume concentration"""
+        try:
+            if not volume_dist:
+                return []
+            
+            total_volume = sum(volume_dist.values())
+            average_volume = total_volume / len(volume_dist)
+            
+            volume_nodes = []
+            
+            for price_level, volume in volume_dist.items():
+                percentage = (volume / total_volume * 100) if total_volume > 0 else 0.0
+                
+                # Classify node type
+                if volume >= average_volume * self.high_volume_threshold:
+                    node_type = VolumeNodeType.HIGH_VOLUME_NODE
+                elif volume <= average_volume * self.low_volume_threshold:
+                    node_type = VolumeNodeType.LOW_VOLUME_NODE
+                else:
+                    continue  # Skip medium volume nodes
+                
+                # Find first and last occurrence of this price level
+                price_touches = data[(data['Low'] <= price_level) & (data['High'] >= price_level)]
+                
+                if len(price_touches) > 0:
+                    timestamp_first = price_touches.index[0]
+                    timestamp_last = price_touches.index[-1]
+                    bar_count = len(price_touches)
+                    touched_count = len(price_touches)
+                else:
+                    timestamp_first = data.index[0]
+                    timestamp_last = data.index[-1]
+                    bar_count = 1
+                    touched_count = 1
+                
+                # Determine if institutional level
+                is_institutional = volume >= average_volume * self.institutional_threshold
+                
+                # Calculate confluence score if enabled
+                confluence_score = 0.0
+                if self.confluence_enabled:
+                    confluence_score = self._calculate_node_confluence(price_level, data)
+                
+                node = VolumeNode(
+                    price_level=price_level,
+                    volume=volume,
                     percentage=percentage,
-                    bar_count=node['bar_count'],
-                    first_time=node['first_time'],
-                    last_time=node['last_time']
+                    node_type=node_type,
+                    bar_count=bar_count,
+                    timestamp_first=timestamp_first,
+                    timestamp_last=timestamp_last,
+                    is_institutional_level=is_institutional,
+                    confluence_score=confluence_score,
+                    touched_count=touched_count
                 )
-                filtered_nodes.append(volume_node)
-        
-        return filtered_nodes
-    
-    def _calculate_value_area(self, volume_nodes: List[VolumeNode]) -> ValueArea:
-        """Calculate Value Area (70% of volume around POC)"""
-        if not volume_nodes:
-            return ValueArea(0, 0, 0, 0, 0, 0)
-        
-        # Find POC (highest volume node)
-        poc_node = max(volume_nodes, key=lambda x: x.volume)
-        
-        # Sort nodes by price
-        sorted_nodes = sorted(volume_nodes, key=lambda x: x.price)
-        poc_index = next(i for i, node in enumerate(sorted_nodes) if node.price == poc_node.price)
-        
-        # Calculate total volume
-        total_volume = sum(node.volume for node in volume_nodes)
-        target_volume = total_volume * self.value_area_percentage
-        
-        # Expand around POC until we reach target volume
-        value_area_volume = poc_node.volume
-        lower_index = poc_index
-        upper_index = poc_index
-        
-        while value_area_volume < target_volume:
-            # Determine which direction to expand
-            lower_volume = 0
-            upper_volume = 0
-            
-            if lower_index > 0:
-                lower_volume = sorted_nodes[lower_index - 1].volume
-            
-            if upper_index < len(sorted_nodes) - 1:
-                upper_volume = sorted_nodes[upper_index + 1].volume
-            
-            # Expand in direction with higher volume
-            if lower_volume > upper_volume and lower_index > 0:
-                lower_index -= 1
-                value_area_volume += lower_volume
-            elif upper_volume > 0 and upper_index < len(sorted_nodes) - 1:
-                upper_index += 1
-                value_area_volume += upper_volume
-            elif lower_volume > 0 and lower_index > 0:
-                lower_index -= 1
-                value_area_volume += lower_volume
-            else:
-                break  # Can't expand further
-        
-        value_area_low = sorted_nodes[lower_index].price
-        value_area_high = sorted_nodes[upper_index].price
-        value_area_percentage = (value_area_volume / total_volume) * 100 if total_volume > 0 else 0
-        
-        return ValueArea(
-            value_area_high=value_area_high,
-            value_area_low=value_area_low,
-            value_area_volume=value_area_volume,
-            value_area_percentage=value_area_percentage,
-            poc_price=poc_node.price,
-            poc_volume=poc_node.volume
-        )
-    
-    def _identify_high_volume_nodes(self, volume_nodes: List[VolumeNode]) -> List[VolumeNode]:
-        """Identify high volume nodes (top 20% by volume)"""
-        if not volume_nodes:
-            return []
-        
-        # Sort by volume descending
-        sorted_by_volume = sorted(volume_nodes, key=lambda x: x.volume, reverse=True)
-        
-        # Take top 20%
-        high_volume_count = max(1, int(len(sorted_by_volume) * (1 - self.high_volume_threshold)))
-        
-        return sorted_by_volume[:high_volume_count]
-    
-    def _identify_low_volume_nodes(self, volume_nodes: List[VolumeNode]) -> List[VolumeNode]:
-        """Identify low volume nodes (bottom 20% by volume)"""
-        if not volume_nodes:
-            return []
-        
-        # Sort by volume ascending
-        sorted_by_volume = sorted(volume_nodes, key=lambda x: x.volume)
-        
-        # Take bottom 20%
-        low_volume_count = max(1, int(len(sorted_by_volume) * self.low_volume_threshold))
-        
-        return sorted_by_volume[:low_volume_count]
-    
-    def _find_volume_imbalances(self, volume_nodes: List[VolumeNode]) -> List[Dict]:
-        """Find volume imbalances (gaps in volume profile)"""
-        if len(volume_nodes) < 3:
-            return []
-        
-        # Sort nodes by price
-        sorted_nodes = sorted(volume_nodes, key=lambda x: x.price)
-        
-        # Calculate average volume
-        avg_volume = sum(node.volume for node in volume_nodes) / len(volume_nodes)
-        imbalance_threshold = avg_volume * self.imbalance_threshold
-        
-        imbalances = []
-        
-        for i in range(1, len(sorted_nodes) - 1):
-            current_node = sorted_nodes[i]
-            
-            if current_node.volume < imbalance_threshold:
-                # Found potential imbalance
-                imbalance_start = current_node.price
-                imbalance_end = current_node.price
-                imbalance_volume = current_node.volume
                 
-                # Extend imbalance if adjacent nodes are also low volume
-                j = i + 1
-                while (j < len(sorted_nodes) and 
-                       sorted_nodes[j].volume < imbalance_threshold):
-                    imbalance_end = sorted_nodes[j].price
-                    imbalance_volume += sorted_nodes[j].volume
-                    j += 1
-                
-                j = i - 1
-                while (j >= 0 and 
-                       sorted_nodes[j].volume < imbalance_threshold):
-                    imbalance_start = sorted_nodes[j].price
-                    imbalance_volume += sorted_nodes[j].volume
-                    j -= 1
-                
-                if imbalance_end > imbalance_start:
-                    imbalances.append({
-                        'start_price': imbalance_start,
-                        'end_price': imbalance_end,
-                        'total_volume': imbalance_volume,
-                        'range': imbalance_end - imbalance_start,
-                        'severity': 1 - (imbalance_volume / (avg_volume * ((imbalance_end - imbalance_start) / (sorted_nodes[-1].price - sorted_nodes[0].price)) * len(sorted_nodes)))
-                    })
-        
-        # Remove overlapping imbalances
-        unique_imbalances = []
-        for imbalance in imbalances:
-            is_duplicate = False
-            for existing in unique_imbalances:
-                if (imbalance['start_price'] <= existing['end_price'] and 
-                    imbalance['end_price'] >= existing['start_price']):
-                    is_duplicate = True
-                    break
+                volume_nodes.append(node)
             
-            if not is_duplicate:
-                unique_imbalances.append(imbalance)
-        
-        return unique_imbalances
-    
-    def _identify_acceptance_levels(self, volume_nodes: List[VolumeNode], 
-                                  data: pd.DataFrame) -> List[float]:
-        """Identify price levels with sustained acceptance (high time at price)"""
-        acceptance_levels = []
-        
-        if not volume_nodes:
-            return acceptance_levels
-        
-        # Calculate average time spent at each price level
-        for node in volume_nodes:
-            time_spent = (node.last_time - node.first_time).total_seconds() / 3600 if node.last_time and node.first_time else 0
-            volume_per_hour = node.volume / time_spent if time_spent > 0 else 0
+            # Sort nodes by volume (descending)
+            volume_nodes.sort(key=lambda x: x.volume, reverse=True)
             
-            # High acceptance = high volume AND significant time spent
-            if (node.percentage > 5.0 and  # At least 5% of total volume
-                time_spent > 1 and        # At least 1 hour
-                volume_per_hour > 0):     # Sustained activity
-                acceptance_levels.append(node.price)
-        
-        return acceptance_levels
+            return volume_nodes
+            
+        except Exception as e:
+            logger.error(f"Error classifying volume nodes: {e}")
+            return []
     
-    def _identify_rejection_levels(self, volume_nodes: List[VolumeNode], 
-                                 data: pd.DataFrame) -> List[float]:
-        """Identify price levels with quick rejection (low time, high volume spikes)"""
-        rejection_levels = []
-        
-        if not volume_nodes:
-            return rejection_levels
+    def _calculate_node_confluence(self, price_level: float, data: pd.DataFrame) -> float:
+        """Calculate confluence score for a volume node"""
+        try:
+            confluence_score = 0.0
+            current_price = data['Close'].iloc[-1]
+            
+            # Distance factor (closer to current price = higher score)
+            price_distance = abs(price_level - current_price) / current_price
+            distance_score = max(0, 1.0 - price_distance * 100)  # Reduce score for distant levels
+            confluence_score += distance_score * 0.3
+            
+            # Recency factor (more recent touches = higher score)
+            recent_data = data.tail(50)  # Last 50 bars
+            recent_touches = recent_data[(recent_data['Low'] <= price_level) & (recent_data['High'] >= price_level)]
+            recency_score = min(len(recent_touches) / 10, 1.0)  # Max score at 10+ touches
+            confluence_score += recency_score * 0.4
+            
+            # Support/Resistance factor
+            support_resistance_score = self._calculate_support_resistance_strength(price_level, data)
+            confluence_score += support_resistance_score * 0.3
+            
+            return min(confluence_score, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Error calculating confluence score: {e}")
+            return 0.0
+    
+    def _calculate_support_resistance_strength(self, price_level: float, data: pd.DataFrame) -> float:
+        """Calculate support/resistance strength for a price level"""
+        try:
+            touches = data[(data['Low'] <= price_level * 1.001) & (data['High'] >= price_level * 0.999)]
+            
+            if len(touches) < 2:
+                return 0.0
+            
+            # Count bounces vs breaks
+            bounces = 0
+            breaks = 0
+            
+            for idx, touch in touches.iterrows():
+                next_idx = data.index.get_loc(idx) + 1
+                if next_idx < len(data):
+                    next_bar = data.iloc[next_idx]
+                    
+                    if touch['Low'] <= price_level <= touch['High']:
+                        if next_bar['Close'] > price_level:
+                            bounces += 1
+                        else:
+                            breaks += 1
+            
+            total_interactions = bounces + breaks
+            if total_interactions == 0:
+                return 0.0
+            
+            bounce_rate = bounces / total_interactions
+            return bounce_rate
+            
+        except Exception as e:
+            logger.error(f"Error calculating support/resistance strength: {e}")
+            return 0.0
+    
+    def _identify_institutional_levels(self, volume_nodes: List[VolumeNode]) -> List[float]:
+        """Identify institutional activity levels from volume nodes"""
+        institutional_levels = []
         
         for node in volume_nodes:
-            time_spent = (node.last_time - node.first_time).total_seconds() / 3600 if node.last_time and node.first_time else 0
-            volume_per_hour = node.volume / time_spent if time_spent > 0 else float('inf')
-            
-            # High rejection = high volume BUT very short time
-            if (node.percentage > 3.0 and      # At least 3% of volume
-                time_spent < 0.5 and          # Less than 30 minutes
-                volume_per_hour > 1000):      # Very high volume rate
-                rejection_levels.append(node.price)
+            if node.is_institutional_level and node.confluence_score > 0.5:
+                institutional_levels.append(node.price_level)
         
-        return rejection_levels
-    
-    def _cleanup_old_profiles(self):
-        """Remove old session profiles to manage memory"""
-        max_profiles = 10
-        if len(self.session_profiles) > max_profiles:
-            self.session_profiles = self.session_profiles[-max_profiles:]
-    
-    def get_current_profile_context(self, current_price: float, 
-                                  profile: VolumeProfile) -> Dict:
-        """Get current market context relative to volume profile"""
-        if not profile or not profile.volume_nodes:
-            return {'context': 'no_profile_data'}
+        # Sort by volume (most institutional first)
+        institutional_levels.sort(key=lambda price: next(
+            node.volume for node in volume_nodes if node.price_level == price
+        ), reverse=True)
         
-        context = {
-            'current_price': current_price,
-            'poc_price': profile.poc.price,
-            'value_area_high': profile.value_area.value_area_high,
-            'value_area_low': profile.value_area.value_area_low,
-            'price_position': 'unknown',
-            'volume_context': 'unknown',
-            'nearest_high_volume_node': None,
-            'nearest_imbalance': None
+        return institutional_levels[:10]  # Top 10 institutional levels
+    
+    def _identify_support_resistance_levels(self, volume_nodes: List[VolumeNode], data: pd.DataFrame) -> Dict[str, List[float]]:
+        """Identify support and resistance levels from volume profile"""
+        current_price = data['Close'].iloc[-1]
+        
+        support_levels = []
+        resistance_levels = []
+        
+        for node in volume_nodes:
+            if node.node_type == VolumeNodeType.HIGH_VOLUME_NODE:
+                if node.price_level < current_price:
+                    support_levels.append(node.price_level)
+                else:
+                    resistance_levels.append(node.price_level)
+        
+        # Sort support levels (highest first), resistance levels (lowest first)
+        support_levels.sort(reverse=True)
+        resistance_levels.sort()
+        
+        return {
+            'support': support_levels[:5],  # Top 5 support levels
+            'resistance': resistance_levels[:5]  # Top 5 resistance levels
         }
-        
-        # Determine price position
-        if current_price > profile.value_area.value_area_high:
-            context['price_position'] = 'above_value_area'
-        elif current_price < profile.value_area.value_area_low:
-            context['price_position'] = 'below_value_area'
-        else:
-            context['price_position'] = 'inside_value_area'
-        
-        # Determine volume context
-        poc_distance = abs(current_price - profile.poc.price)
-        va_range = profile.value_area.value_area_range
-        
-        if poc_distance < va_range * 0.1:  # Within 10% of POC
-            context['volume_context'] = 'near_poc'
-        elif context['price_position'] == 'inside_value_area':
-            context['volume_context'] = 'inside_value_area'
-        else:
-            context['volume_context'] = 'outside_value_area'
-        
-        # Find nearest high volume node
-        if profile.high_volume_nodes:
-            nearest_hv_node = min(profile.high_volume_nodes, 
-                                key=lambda x: abs(x.price - current_price))
-            context['nearest_high_volume_node'] = {
-                'price': nearest_hv_node.price,
-                'volume': nearest_hv_node.volume,
-                'distance': abs(current_price - nearest_hv_node.price)
-            }
-        
-        # Find nearest volume imbalance
-        if profile.volume_imbalances:
-            for imbalance in profile.volume_imbalances:
-                if (imbalance['start_price'] <= current_price <= imbalance['end_price']):
-                    context['nearest_imbalance'] = {
-                        'inside_imbalance': True,
-                        'imbalance': imbalance
-                    }
-                    break
-            
-            if 'nearest_imbalance' not in context:
-                nearest_imbalance = min(profile.volume_imbalances,
-                                      key=lambda x: min(
-                                          abs(current_price - x['start_price']),
-                                          abs(current_price - x['end_price'])
-                                      ))
-                context['nearest_imbalance'] = {
-                    'inside_imbalance': False,
-                    'imbalance': nearest_imbalance,
-                    'distance': min(
-                        abs(current_price - nearest_imbalance['start_price']),
-                        abs(current_price - nearest_imbalance['end_price'])
-                    )
-                }
-        
-        return context
     
-    def get_trading_levels(self, profile: VolumeProfile) -> Dict:
-        """Get key trading levels from volume profile"""
-        if not profile:
+    def _identify_volume_imbalances(self, volume_dist: Dict[float, int]) -> List[Tuple[float, float]]:
+        """Identify volume imbalance areas (gaps in volume profile)"""
+        try:
+            if len(volume_dist) < 3:
+                return []
+            
+            sorted_prices = sorted(volume_dist.keys())
+            average_volume = sum(volume_dist.values()) / len(volume_dist)
+            min_volume_threshold = average_volume * 0.2  # 20% of average
+            
+            imbalances = []
+            imbalance_start = None
+            
+            for i, price in enumerate(sorted_prices):
+                volume = volume_dist[price]
+                
+                if volume < min_volume_threshold:
+                    if imbalance_start is None:
+                        imbalance_start = price
+                else:
+                    if imbalance_start is not None:
+                        imbalances.append((imbalance_start, price))
+                        imbalance_start = None
+            
+            # Close any open imbalance at the end
+            if imbalance_start is not None:
+                imbalances.append((imbalance_start, sorted_prices[-1]))
+            
+            # Filter out small imbalances
+            significant_imbalances = []
+            for start, end in imbalances:
+                gap_size = abs(end - start)
+                avg_price = (start + end) / 2
+                gap_percentage = (gap_size / avg_price) * 100
+                
+                if gap_percentage > 0.1:  # At least 0.1% price gap
+                    significant_imbalances.append((start, end))
+            
+            return significant_imbalances
+            
+        except Exception as e:
+            logger.error(f"Error identifying volume imbalances: {e}")
+            return []
+    
+    def _analyze_price_context(self, current_price: float, poc_price: float, value_area: ValueArea) -> str:
+        """Analyze current price context relative to volume profile"""
+        try:
+            # Price relative to POC
+            if abs(current_price - poc_price) / poc_price < 0.001:  # Within 0.1%
+                poc_context = "AT_POC"
+            elif current_price > poc_price:
+                poc_context = "ABOVE_POC"
+            else:
+                poc_context = "BELOW_POC"
+            
+            # Price relative to Value Area
+            if value_area.value_area_low <= current_price <= value_area.value_area_high:
+                va_context = "INSIDE_VALUE_AREA"
+            elif current_price > value_area.value_area_high:
+                va_context = "ABOVE_VALUE_AREA"
+            else:
+                va_context = "BELOW_VALUE_AREA"
+            
+            return f"{va_context}_{poc_context}"
+            
+        except Exception as e:
+            logger.error(f"Error analyzing price context: {e}")
+            return "UNKNOWN_CONTEXT"
+    
+    def _determine_trading_bias(self, current_price: float, value_area: ValueArea, volume_nodes: List[VolumeNode]) -> str:
+        """Determine trading bias based on volume profile analysis"""
+        try:
+            # Price position bias
+            if current_price > value_area.value_area_high:
+                position_bias = "BULLISH"
+            elif current_price < value_area.value_area_low:
+                position_bias = "BEARISH"
+            else:
+                position_bias = "NEUTRAL"
+            
+            # Volume distribution bias
+            upper_half_volume = sum(node.volume for node in volume_nodes 
+                                  if node.price_level > value_area.midpoint)
+            lower_half_volume = sum(node.volume for node in volume_nodes 
+                                  if node.price_level < value_area.midpoint)
+            
+            total_volume = upper_half_volume + lower_half_volume
+            
+            if total_volume > 0:
+                upper_percentage = upper_half_volume / total_volume
+                
+                if upper_percentage > 0.6:
+                    volume_bias = "BULLISH"
+                elif upper_percentage < 0.4:
+                    volume_bias = "BEARISH"
+                else:
+                    volume_bias = "NEUTRAL"
+            else:
+                volume_bias = "NEUTRAL"
+            
+            # Combine biases
+            if position_bias == volume_bias and position_bias != "NEUTRAL":
+                return f"STRONG_{position_bias}"
+            elif position_bias != "NEUTRAL":
+                return f"MODERATE_{position_bias}"
+            elif volume_bias != "NEUTRAL":
+                return f"WEAK_{volume_bias}"
+            else:
+                return "NEUTRAL"
+                
+        except Exception as e:
+            logger.error(f"Error determining trading bias: {e}")
+            return "NEUTRAL"
+    
+    def _calculate_analysis_confidence(self, volume_dist: Dict[float, int], volume_nodes: List[VolumeNode]) -> float:
+        """Calculate confidence in volume profile analysis"""
+        try:
+            confidence = 0.0
+            
+            # Data quality factor
+            total_volume = sum(volume_dist.values())
+            price_levels_count = len(volume_dist)
+            
+            if total_volume > 10000 and price_levels_count >= 10:
+                data_quality = 0.9
+            elif total_volume > 1000 and price_levels_count >= 5:
+                data_quality = 0.7
+            else:
+                data_quality = 0.5
+            
+            confidence += data_quality * 0.4
+            
+            # Node quality factor
+            high_volume_nodes = [node for node in volume_nodes if node.node_type == VolumeNodeType.HIGH_VOLUME_NODE]
+            institutional_nodes = [node for node in volume_nodes if node.is_institutional_level]
+            
+            if len(institutional_nodes) >= 3:
+                node_quality = 0.9
+            elif len(high_volume_nodes) >= 5:
+                node_quality = 0.7
+            elif len(high_volume_nodes) >= 2:
+                node_quality = 0.5
+            else:
+                node_quality = 0.3
+            
+            confidence += node_quality * 0.4
+            
+            # Distribution quality factor
+            volume_values = list(volume_dist.values())
+            if len(volume_values) > 1:
+                volume_std = np.std(volume_values)
+                volume_mean = np.mean(volume_values)
+                coefficient_of_variation = volume_std / volume_mean if volume_mean > 0 else 0
+                
+                # Good distribution should have some variation but not too much
+                if 0.3 <= coefficient_of_variation <= 1.5:
+                    distribution_quality = 0.8
+                elif 0.1 <= coefficient_of_variation <= 2.0:
+                    distribution_quality = 0.6
+                else:
+                    distribution_quality = 0.4
+            else:
+                distribution_quality = 0.2
+            
+            confidence += distribution_quality * 0.2
+            
+            return min(confidence, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Error calculating analysis confidence: {e}")
+            return 0.5
+    
+    def _calculate_volume_statistics(self, volume_dist: Dict[float, int], value_area: ValueArea) -> Dict[str, float]:
+        """Calculate volume distribution statistics"""
+        try:
+            volumes = list(volume_dist.values())
+            total_volume = sum(volumes)
+            
+            if not volumes:
+                return {}
+            
+            stats = {
+                'total_volume': total_volume,
+                'mean_volume': np.mean(volumes),
+                'median_volume': np.median(volumes),
+                'std_volume': np.std(volumes),
+                'max_volume': max(volumes),
+                'min_volume': min(volumes),
+                'volume_range': max(volumes) - min(volumes),
+                'coefficient_of_variation': np.std(volumes) / np.mean(volumes) if np.mean(volumes) > 0 else 0,
+                'value_area_percentage': value_area.value_area_percentage,
+                'value_area_width_percentage': (value_area.width / ((max(volume_dist.keys()) - min(volume_dist.keys())) or 1)) * 100,
+                'skewness': value_area.skew
+            }
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error calculating volume statistics: {e}")
+            return {}
+    
+    def get_volume_profile_summary(self, analysis: VolumeProfileAnalysis) -> Dict:
+        """Get summary of volume profile analysis for quick reference"""
+        if not analysis:
             return {}
         
-        levels = {
-            'poc': profile.poc.price,
-            'value_area_high': profile.value_area.value_area_high,
-            'value_area_low': profile.value_area.value_area_low,
-            'high_volume_levels': [node.price for node in profile.high_volume_nodes],
-            'acceptance_levels': profile.acceptance_levels,
-            'rejection_levels': profile.rejection_levels,
-            'imbalance_zones': [
-                {
-                    'start': imb['start_price'],
-                    'end': imb['end_price'],
-                    'mid': (imb['start_price'] + imb['end_price']) / 2
-                }
-                for imb in profile.volume_imbalances
-            ]
+        return {
+            'poc_price': analysis.point_of_control,
+            'poc_volume_percentage': analysis.poc_percentage,
+            'value_area_range': (analysis.value_area.value_area_low, analysis.value_area.value_area_high),
+            'value_area_width': analysis.value_area.width,
+            'institutional_levels_count': len(analysis.institutional_levels),
+            'high_volume_nodes_count': len(analysis.high_volume_nodes),
+            'support_levels_count': len(analysis.support_levels),
+            'resistance_levels_count': len(analysis.resistance_levels),
+            'volume_imbalances_count': len(analysis.volume_imbalances),
+            'trading_bias': analysis.trading_bias,
+            'price_context': analysis.current_price_context,
+            'confidence': analysis.confidence,
+            'total_volume': analysis.total_volume
         }
+    
+    def get_trading_levels(self, analysis: VolumeProfileAnalysis, current_price: float) -> Dict[str, List[float]]:
+        """Get key trading levels from volume profile analysis"""
+        if not analysis:
+            return {'support': [], 'resistance': [], 'targets': []}
         
-        return levels
-    
-    def analyze_session_profile(self, data: pd.DataFrame) -> Optional[VolumeProfile]:
-        """Analyze session-based volume profile"""
-        return self.analyze_volume_profile(data, VolumeProfileType.SESSION)
-    
-    def analyze_anchored_profile(self, data: pd.DataFrame, 
-                               anchor_time: datetime) -> Optional[VolumeProfile]:
-        """Analyze anchored volume profile from specific time"""
-        return self.analyze_volume_profile(data, VolumeProfileType.ANCHORED, anchor_time)
-    
-    def get_profile_summary(self, profile: VolumeProfile) -> Dict:
-        """Get summary of volume profile analysis"""
-        if not profile:
-            return {'error': 'No profile data'}
+        # Get nearest levels to current price
+        all_levels = []
         
-        summary = {
-            'profile_type': profile.profile_type.value,
-            'total_volume': profile.total_volume,
-            'total_bars': profile.total_bars,
-            'price_range': profile.price_range,
-            'poc_price': profile.poc.price,
-            'poc_volume': profile.poc.volume,
-            'poc_percentage': profile.poc.percentage,
-            'value_area_range': profile.value_area.value_area_range,
-            'value_area_percentage': profile.value_area.value_area_percentage,
-            'volume_distribution': profile.volume_distribution_balance,
-            'high_volume_nodes_count': len(profile.high_volume_nodes),
-            'low_volume_nodes_count': len(profile.low_volume_nodes),
-            'volume_imbalances_count': len(profile.volume_imbalances),
-            'acceptance_levels_count': len(profile.acceptance_levels),
-            'rejection_levels_count': len(profile.rejection_levels)
+        # Add POC
+        all_levels.append(analysis.point_of_control)
+        
+        # Add value area boundaries
+        all_levels.extend([analysis.value_area.value_area_high, analysis.value_area.value_area_low])
+        
+        # Add institutional levels
+        all_levels.extend(analysis.institutional_levels)
+        
+        # Add high volume nodes
+        all_levels.extend([node.price_level for node in analysis.high_volume_nodes])
+        
+        # Remove duplicates and sort
+        unique_levels = sorted(set(all_levels))
+        
+        # Categorize relative to current price
+        support_levels = [level for level in unique_levels if level < current_price]
+        resistance_levels = [level for level in unique_levels if level > current_price]
+        
+        # Get nearest levels
+        nearest_support = sorted(support_levels, reverse=True)[:5]  # 5 nearest support
+        nearest_resistance = sorted(resistance_levels)[:5]  # 5 nearest resistance
+        
+        # Target levels (further resistance/support)
+        target_levels = []
+        if len(resistance_levels) > 5:
+            target_levels.extend(resistance_levels[5:8])
+        if len(support_levels) > 5:
+            target_levels.extend(support_levels[-8:-5])
+        
+        return {
+            'support': nearest_support,
+            'resistance': nearest_resistance,
+            'targets': sorted(target_levels)
         }
+    
+    def analyze_volume_confluence(self, analysis: VolumeProfileAnalysis, price_level: float, tolerance: float = 0.001) -> Dict:
+        """Analyze volume confluence at a specific price level"""
+        if not analysis:
+            return {'confluence_score': 0.0, 'factors': []}
         
-        return summary
+        confluence_factors = []
+        confluence_score = 0.0
+        
+        # Check proximity to POC
+        poc_distance = abs(price_level - analysis.point_of_control) / analysis.point_of_control
+        if poc_distance <= tolerance:
+            confluence_factors.append('POC')
+            confluence_score += 0.3
+        
+        # Check proximity to Value Area boundaries
+        vah_distance = abs(price_level - analysis.value_area.value_area_high) / analysis.value_area.value_area_high
+        val_distance = abs(price_level - analysis.value_area.value_area_low) / analysis.value_area.value_area_low
+        
+        if vah_distance <= tolerance:
+            confluence_factors.append('VAH')
+            confluence_score += 0.25
+        
+        if val_distance <= tolerance:
+            confluence_factors.append('VAL')
+            confluence_score += 0.25
+        
+        # Check proximity to high volume nodes
+        for node in analysis.high_volume_nodes:
+            node_distance = abs(price_level - node.price_level) / node.price_level
+            if node_distance <= tolerance:
+                confluence_factors.append(f'HIGH_VOLUME_NODE')
+                confluence_score += 0.1
+        
+        # Check proximity to institutional levels
+        for inst_level in analysis.institutional_levels:
+            inst_distance = abs(price_level - inst_level) / inst_level
+            if inst_distance <= tolerance:
+                confluence_factors.append('INSTITUTIONAL_LEVEL')
+                confluence_score += 0.15
+        
+        return {
+            'confluence_score': min(confluence_score, 1.0),
+            'factors': confluence_factors,
+            'factor_count': len(confluence_factors)
+        }
 
-# Export main classes
+# Utility functions for integration with other SMC components
+def get_volume_support_resistance(analysis: VolumeProfileAnalysis, current_price: float) -> Dict[str, float]:
+    """Get nearest volume-based support and resistance levels"""
+    if not analysis:
+        return {'nearest_support': 0.0, 'nearest_resistance': 0.0}
+    
+    # Find nearest support (highest price below current)
+    support_candidates = [
+        analysis.point_of_control,
+        analysis.value_area.value_area_low,
+        *[node.price_level for node in analysis.high_volume_nodes if node.price_level < current_price]
+    ]
+    
+    valid_support = [level for level in support_candidates if level < current_price]
+    nearest_support = max(valid_support) if valid_support else 0.0
+    
+    # Find nearest resistance (lowest price above current)
+    resistance_candidates = [
+        analysis.point_of_control,
+        analysis.value_area.value_area_high,
+        *[node.price_level for node in analysis.high_volume_nodes if node.price_level > current_price]
+    ]
+    
+    valid_resistance = [level for level in resistance_candidates if level > current_price]
+    nearest_resistance = min(valid_resistance) if valid_resistance else 0.0
+    
+    return {
+        'nearest_support': nearest_support,
+        'nearest_resistance': nearest_resistance
+    }
+
+def calculate_volume_profile_bias(analysis: VolumeProfileAnalysis) -> Dict[str, Union[str, float]]:
+    """Calculate volume profile bias for integration with BIAS analyzer"""
+    if not analysis:
+        return {'direction': 'NEUTRAL', 'strength': 0.0, 'confidence': 0.0}
+    
+    # Convert trading bias to standardized format
+    bias_mapping = {
+        'STRONG_BULLISH': {'direction': 'BULLISH', 'strength': 0.8},
+        'MODERATE_BULLISH': {'direction': 'BULLISH', 'strength': 0.6},
+        'WEAK_BULLISH': {'direction': 'BULLISH', 'strength': 0.4},
+        'STRONG_BEARISH': {'direction': 'BEARISH', 'strength': 0.8},
+        'MODERATE_BEARISH': {'direction': 'BEARISH', 'strength': 0.6},
+        'WEAK_BEARISH': {'direction': 'BEARISH', 'strength': 0.4},
+        'NEUTRAL': {'direction': 'NEUTRAL', 'strength': 0.0}
+    }
+    
+    bias_info = bias_mapping.get(analysis.trading_bias, {'direction': 'NEUTRAL', 'strength': 0.0})
+    
+    return {
+        'direction': bias_info['direction'],
+        'strength': bias_info['strength'],
+        'confidence': analysis.confidence,
+        'poc_price': analysis.point_of_control,
+        'value_area_range': (analysis.value_area.value_area_low, analysis.value_area.value_area_high),
+        'institutional_levels': analysis.institutional_levels[:3]  # Top 3 institutional levels
+    }
+
+# Export main classes and functions
 __all__ = [
     'VolumeProfileAnalyzer',
-    'VolumeProfile',
+    'VolumeProfileAnalysis',
     'VolumeNode',
     'ValueArea',
+    'VolumeNodeType',
     'VolumeProfileType',
-    'POCType'
+    'get_volume_support_resistance',
+    'calculate_volume_profile_bias'
 ]
